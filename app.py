@@ -528,47 +528,57 @@ st.subheader("Lithography & OPC Comprehensive Verification")
 fig_result = generate_comprehensive_plot()
 st.pyplot(fig_result)
 
-# 11. 역노광(ILT) + 모서리 세리프 최적화 엔진
-def run_iterative_opc(target_pattern, opt_kernel, opt_th, iterations=8):
+# 11. 단선 방지 안전 코어 기반 하이브리드 OPC 엔진
+def run_iterative_opc(target_pattern, opt_kernel, opt_th, iterations=6):
     h, w = target_pattern.shape
-    cont_mask = target_pattern.copy()
-
-    pad = np.pad(target_pattern, 1, mode='constant', constant_values=0)
+    base = target_pattern.copy()
+    
+    # 1. 뼈대 보호: 원래 3픽셀 폭 배선의 중심선(Core Skeleton)은 절대 깎이지 않도록 잠금
+    from scipy.ndimage import binary_erosion
+    core_skeleton = binary_erosion(base, structure=np.ones((2, 2))).astype(float)
+    
+    mask = base.copy()
+    
+    # 2. 선 끝단(Line-End) 및 코너 세리프(Serif) 타겟 보정
+    pad = np.pad(base, 1, mode='constant', constant_values=0)
     for r in range(h):
         for c in range(w):
             center = pad[r+1, c+1]
             if center == 0:
-                up, down, left, right = pad[r, c+1], pad[r+2, c+1], pad[r+1, c], pad[r+1, c+2]
-                if (up == 1 and left == 1) or (up == 1 and right == 1) or \
-                   (down == 1 and left == 1) or (down == 1 and right == 1):
-                    cont_mask[r, c] += 0.6
+                # 볼록 외곽 코너: 1픽셀 세리프 돌기 부착
+                neighbors_diag = [
+                    (pad[r, c+1], pad[r+1, c]),       # 좌상
+                    (pad[r, c+1], pad[r+1, c+2]),     # 우상
+                    (pad[r+2, c+1], pad[r+1, c]),     # 좌하
+                    (pad[r+2, c+1], pad[r+1, c+2])    # 우하
+                ]
+                if any(v1 == 1 and v2 == 1 for v1, v2 in neighbors_diag):
+                    mask[r, c] = 1.0
             elif center == 1:
+                # 선 끝단(Line-End): 상하 끝단을 1픽셀 연장하여 수축 차단
                 up, down = pad[r, c+1], pad[r+2, c+1]
                 if (up == 0 and down == 1) or (up == 1 and down == 0):
-                    if c > 0:
-                        cont_mask[r, c-1] += 0.5
-                    if c < w - 1:
-                        cont_mask[r, c+1] += 0.5
+                    if r > 0 and pad[r, c+1] == 0:
+                        mask[r-1, c] = 1.0
+                    if r < h - 1 and pad[r+2, c+1] == 0:
+                        mask[r+1, c] = 1.0
 
-    diff_kernel = np.array([
-        [0.2, 0.5, 0.2],
-        [0.5, 1.0, 0.5],
-        [0.2, 0.5, 0.2]
-    ])
-    diff_kernel = diff_kernel / np.sum(diff_kernel)
-
-    for it in range(iterations):
-        bin_mask = (cont_mask >= 0.40).astype(float)
-        exp = convolve(bin_mask, opt_kernel, mode='constant', cval=0.0)
+    # 3. 모델 피드백 루프: 부족한 곳은 채우고, 척추 코어는 영구 보호
+    for _ in range(iterations):
+        exp = convolve(mask, opt_kernel, mode='constant', cval=0.0)
         max_e = np.max(exp) if np.max(exp) > 0 else 1.0
-        printed_curr = ((exp / max_e) >= opt_th).astype(float)
+        printed = ((exp / max_e) >= opt_th).astype(float)
+        
+        # 오차: Target 대비 결손부(+1)는 살 붙이기
+        error = base - printed
+        
+        # 덜 찍힌 곳(빨강)에 우선적으로 마스크 살 찌우기
+        mask = np.clip(mask + 0.5 * error, 0.0, 1.0)
+        
+        # 최소 선폭 보호: 원본 패턴의 중심부는 절대 0으로 떨어지지 않게 강제 1 고정
+        mask = np.maximum(mask, core_skeleton)
 
-        error = target_pattern - printed_curr
-        gradient = convolve(error, diff_kernel, mode='constant', cval=0.0)
-        cont_mask += 0.7 * gradient
-        cont_mask = np.clip(cont_mask, 0.0, 1.2)
-
-    return (cont_mask >= 0.40).astype(float)
+    return (mask >= 0.45).astype(float)
 
 # 12. 마스크 제어 및 내보내기 영역
 st.subheader("OPC Modification & Export")

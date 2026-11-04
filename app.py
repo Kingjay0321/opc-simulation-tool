@@ -46,7 +46,7 @@ def get_nand2_x4():
     mask[30:48, 30:33] = 1.0
     return mask
 
-# 양방향 통신 컴포넌트 생성 (모던 UI 적용)
+# 양방향 통신 컴포넌트 생성 (모던 UI)
 def build_editor_component():
     current_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else os.getcwd()
     comp_dir = os.path.join(current_dir, "pixel_grid_component")
@@ -337,8 +337,8 @@ threshold = st.sidebar.slider("Resist Threshold (I_th)", 0.20, 0.80, 0.55, 0.01)
 
 st.sidebar.subheader("Display Options")
 show_grid = st.sidebar.checkbox("Display Unit Grid (3.5 nm)", value=True)
-show_dimension = st.sidebar.checkbox("Display CAD Dimension Arrows (치수선)", value=True)
-show_outline = st.sidebar.checkbox("Display Target White Dashed Outline (목표 외곽선)", value=True)
+show_dimension = st.sidebar.checkbox("Display CAD Dimension Arrows", value=True)
+show_outline = st.sidebar.checkbox("Display Target Outline (White Dashed)", value=True)
 
 # 커널 정의
 if kernel_type == "Standard 5x5 Matrix":
@@ -358,7 +358,7 @@ else:
     kernel = kernel / np.sum(kernel)
 
 # 6. 정량적 전/후(Before vs After) 듀얼 시뮬레이션 연산
-# (1) 보정 전(Before OPC): 타겟 패턴을 그대로 마스크로 사용
+# (1) 보정 전: 원본 마스크 기준
 exp_before = convolve(target, kernel, mode='constant', cval=0.0)
 max_eb = np.max(exp_before) if np.max(exp_before) > 0 else 1.0
 norm_exp_before = exp_before / max_eb
@@ -369,7 +369,7 @@ union_b = np.logical_or(target == 1, printed_before == 1).sum()
 iou_before = (inter_b / union_b) * 100.0 if union_b > 0 else 0.0
 error_b = int(union_b - inter_b)
 
-# (2) 보정 후(After OPC): 현재 세션의 마스크 사용
+# (2) 보정 후: 현재 세션 마스크 기준
 exp_after = convolve(st.session_state.current_mask, kernel, mode='constant', cval=0.0)
 max_ea = np.max(exp_after) if np.max(exp_after) > 0 else 1.0
 norm_exp_after = exp_after / max_ea
@@ -380,23 +380,21 @@ union_a = np.logical_or(target == 1, printed_after == 1).sum()
 iou_after = (inter_a / union_a) * 100.0 if union_a > 0 else 0.0
 error_a = int(union_a - inter_a)
 
-# 개선율 지표 산출
 iou_delta = iou_after - iou_before
-error_delta = error_b - error_a  # 양수면 에러 감소
+error_delta = error_b - error_a
 
 h_px, w_px = target.shape
 width_nm = w_px * unit_scale
 height_nm = h_px * unit_scale
 extent_nm = [0, width_nm, height_nm, 0]
-aspect_ratio = h_px / w_px
 
-# 7. 메트릭 대시보드 (과제 마 항목 정량적 비교 충족)
-st.subheader("Quantitative Evaluation & OPC Improvement (과제 결과 검증)")
+# 7. 메트릭 대시보드
+st.subheader("Quantitative Evaluation & Improvement")
 m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-m_col1.metric("레이아웃 실제 치수", f"{width_nm:.1f} × {height_nm:.1f} nm", f"{w_px} × {h_px} Grid")
-m_col2.metric("보정 전 일치도 (Before IoU)", f"{iou_before:.2f}%", f"{error_b} px 오차", delta_color="off")
-m_col3.metric("보정 후 일치도 (After IoU)", f"{iou_after:.2f}%", f"{iou_delta:+.2f}% p 향상", delta_color="normal")
-m_col4.metric("오차 픽셀 감소량", f"{error_delta} px 감소", f"개선도: {(iou_delta/iou_before*100) if iou_before>0 else 0:+.1f}%", delta_color="normal")
+m_col1.metric("Physical Size", f"{width_nm:.1f} × {height_nm:.1f} nm", f"{w_px} × {h_px} Grid")
+m_col2.metric("Before OPC (IoU)", f"{iou_before:.2f}%", f"{error_b} px Error", delta_color="off")
+m_col3.metric("After OPC (IoU)", f"{iou_after:.2f}%", f"{iou_delta:+.2f}% p", delta_color="normal")
+m_col4.metric("Error Reduction", f"{error_delta} px Saved", f"Improvement: {(iou_delta/iou_before*100) if iou_before>0 else 0:+.1f}%", delta_color="normal")
 
 # 8. CAD 치수 화살표 렌더링 함수
 def draw_dimension_arrows(ax):
@@ -440,75 +438,84 @@ def draw_dimension_arrows(ax):
         ax.text(width_nm + offset_right + 2.0, height_nm / 2.0, f'{height_nm:.1f} nm ({h_px}λ)',
                 color='#1a4b8c', fontsize=9, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
 
-# 9. 목표 패턴 흰색 점선 외곽선 오버레이 헬퍼
+# 9. 상하반전 없이 정확히 겹치도록 보정된 타겟 점선 외곽선 헬퍼
 def overlay_target_outline(ax):
     if not show_outline:
         return
-    # Matplotlib contour로 0.5 임계 경계선을 흰색 점선으로 추출
+    # extent_nm: [0, width_nm, height_nm, 0] 매핑으로 상하 방향 완벽 일치
     ax.contour(target, levels=[0.5], colors=['#ffffff'], linestyles=['--'], linewidths=[1.3],
-               extent=[0, width_nm, 0, height_nm], origin='upper')
+               extent=[0, width_nm, height_nm, 0], origin='upper')
 
-# 10. 종합 전/후 비교 분석 플롯 생성 (과제 보고서용 종합 플롯)
+# 10. 전/후 명확 분리 종합 비교 분석 플롯
 def generate_comprehensive_plot():
-    # 2개 행 구조: [Row 0: Before OPC 분석] / [Row 1: After OPC 분석]
-    fig, axes = plt.subplots(2, 4, figsize=(22, 12), constrained_layout=True)
+    fig = plt.figure(figsize=(22, 13))
+    # 상하 2개 섹션 사이 여백을 넉넉히 확보
+    subfigs = fig.subfigures(2, 1, hspace=0.14)
 
     major_x = 21.0 if width_nm > 40 else 10.5
     major_y = 31.5 if height_nm > 60 else 10.5
 
-    # ------------------ Row 0: Before OPC ------------------
-    # (0,0) Target Pattern
-    axes[0, 0].imshow(target, cmap='Blues', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
-    axes[0, 0].set_title("(A) Target Pattern\n(목표 설계)", fontsize=11, fontweight='bold')
-    draw_dimension_arrows(axes[0, 0])
+    # ------------------ TOP SECTION: BEFORE OPC ------------------
+    subfigs[0].suptitle("SECTION 1: BEFORE OPC (Conventional Mask Simulation)",
+                         fontsize=14, fontweight='heavy', color='#b71c1c', x=0.08, ha='left')
+    axes_top = subfigs[0].subplots(1, 4)
 
-    # (0,1) Before Mask (Raw Target)
-    axes[0, 1].imshow(target, cmap='Purples', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
-    axes[0, 1].set_title("(B-1) Before Mask (No OPC)\n(보정 전 원본 마스크)", fontsize=11, fontweight='bold')
+    # (0) Target Pattern
+    axes_top[0].imshow(target, cmap='Blues', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
+    axes_top[0].set_title("(A) Target Pattern\n(Design Specification)", fontsize=11, fontweight='bold')
+    draw_dimension_arrows(axes_top[0])
 
-    # (0,2) Before Aerial Image
-    im_c0 = axes[0, 2].imshow(norm_exp_before, cmap='inferno', origin='upper', extent=extent_nm, interpolation='bilinear', vmin=0.0, vmax=1.0)
-    axes[0, 2].set_title("(C-1) Aerial Image (Before)\n(보정 전 노광 분포)", fontsize=11, fontweight='bold')
-    overlay_target_outline(axes[0, 2])
-    plt.colorbar(im_c0, ax=axes[0, 2], fraction=0.046, pad=0.04)
+    # (1) Before Mask
+    axes_top[1].imshow(target, cmap='Purples', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
+    axes_top[1].set_title("(B-1) Before Mask (No OPC)\n(Raw Layout Mask)", fontsize=11, fontweight='bold')
 
-    # (0,3) Before Superposition
+    # (2) Before Aerial Image
+    im_c0 = axes_top[2].imshow(norm_exp_before, cmap='inferno', origin='upper', extent=extent_nm, interpolation='bilinear', vmin=0.0, vmax=1.0)
+    axes_top[2].set_title("(C-1) Aerial Image (Before)\n(Light Intensity Profile)", fontsize=11, fontweight='bold')
+    overlay_target_outline(axes_top[2])
+    subfigs[0].colorbar(im_c0, ax=axes_top[2], fraction=0.046, pad=0.04)
+
+    # (3) Before Superposition
     diff_before = np.zeros((*target.shape, 3))
-    diff_before[(target == 1) & (printed_before == 1)] = [0.1, 0.85, 0.1]  # 일치 (초록)
-    diff_before[(target == 1) & (printed_before == 0)] = [0.95, 0.1, 0.1]  # 결손 (빨강)
-    diff_before[(target == 0) & (printed_before == 1)] = [0.1, 0.4, 0.95]  # 번짐 (파랑)
-    axes[0, 3].imshow(diff_before, origin='upper', extent=extent_nm, interpolation='nearest')
-    axes[0, 3].set_title(f"(D-1) Superposition (Before)\nIoU: {iou_before:.2f}% ({error_b}px error)", fontsize=11, fontweight='bold')
-    overlay_target_outline(axes[0, 3])
+    diff_before[(target == 1) & (printed_before == 1)] = [0.1, 0.85, 0.1]
+    diff_before[(target == 1) & (printed_before == 0)] = [0.95, 0.1, 0.1]
+    diff_before[(target == 0) & (printed_before == 1)] = [0.1, 0.4, 0.95]
+    axes_top[3].imshow(diff_before, origin='upper', extent=extent_nm, interpolation='nearest')
+    axes_top[3].set_title(f"(D-1) Superposition (Before)\nIoU: {iou_before:.2f}% ({error_b}px error)", fontsize=11, fontweight='bold')
+    overlay_target_outline(axes_top[3])
 
-    # ------------------ Row 1: After OPC ------------------
-    # (1,0) Target Reference
-    axes[1, 0].imshow(target, cmap='Blues', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
-    axes[1, 0].set_title("(A) Target Reference\n(비교 기준 도면)", fontsize=11, fontweight='bold')
+    # ------------------ BOTTOM SECTION: AFTER OPC ------------------
+    subfigs[1].suptitle("SECTION 2: AFTER OPC (Inverse Lithography & Serif Optimization)",
+                         fontsize=14, fontweight='heavy', color='#1b5e20', x=0.08, ha='left')
+    axes_bot = subfigs[1].subplots(1, 4)
 
-    # (1,1) After Mask (Optimized)
-    axes[1, 1].imshow(st.session_state.current_mask, cmap='Purples', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
-    axes[1, 1].set_title("(B-2) After Mask (OPC Applied)\n(세리프/해머헤드 보정 마스크)", fontsize=11, fontweight='bold')
+    # (0) Target Reference
+    axes_bot[0].imshow(target, cmap='Blues', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
+    axes_bot[0].set_title("(A) Target Reference\n(Golden Target Layout)", fontsize=11, fontweight='bold')
 
-    # (1,2) After Aerial Image
-    im_c1 = axes[1, 2].imshow(norm_exp_after, cmap='inferno', origin='upper', extent=extent_nm, interpolation='bilinear', vmin=0.0, vmax=1.0)
-    axes[1, 2].set_title("(C-2) Aerial Image (After)\n(보정 후 노광 분포)", fontsize=11, fontweight='bold')
-    overlay_target_outline(axes[1, 2])
-    plt.colorbar(im_c1, ax=axes[1, 2], fraction=0.046, pad=0.04)
+    # (1) After Mask
+    axes_bot[1].imshow(st.session_state.current_mask, cmap='Purples', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
+    axes_bot[1].set_title("(B-2) After Mask (With OPC)\n(Optimized Serifs & Jogs)", fontsize=11, fontweight='bold')
 
-    # (1,3) After Superposition
+    # (2) After Aerial Image
+    im_c1 = axes_bot[2].imshow(norm_exp_after, cmap='inferno', origin='upper', extent=extent_nm, interpolation='bilinear', vmin=0.0, vmax=1.0)
+    axes_bot[2].set_title("(C-2) Aerial Image (After)\n(Corrected Intensity Profile)", fontsize=11, fontweight='bold')
+    overlay_target_outline(axes_bot[2])
+    subfigs[1].colorbar(im_c1, ax=axes_bot[2], fraction=0.046, pad=0.04)
+
+    # (3) After Superposition
     diff_after = np.zeros((*target.shape, 3))
-    diff_after[(target == 1) & (printed_after == 1)] = [0.1, 0.85, 0.1]  # 일치 (초록)
-    diff_after[(target == 1) & (printed_after == 0)] = [0.95, 0.1, 0.1]  # 결손 (빨강)
-    diff_after[(target == 0) & (printed_after == 1)] = [0.1, 0.4, 0.95]  # 번짐 (파랑)
-    axes[1, 3].imshow(diff_after, origin='upper', extent=extent_nm, interpolation='nearest')
-    axes[1, 3].set_title(f"(D-2) Superposition (After)\nIoU: {iou_after:.2f}% ({error_a}px error)", fontsize=11, fontweight='bold')
-    overlay_target_outline(axes[1, 3])
+    diff_after[(target == 1) & (printed_after == 1)] = [0.1, 0.85, 0.1]
+    diff_after[(target == 1) & (printed == 0)] = [0.95, 0.1, 0.1]
+    diff_after[(target == 0) & (printed_after == 1)] = [0.1, 0.4, 0.95]
+    axes_bot[3].imshow(diff_after, origin='upper', extent=extent_nm, interpolation='nearest')
+    axes_bot[3].set_title(f"(D-2) Superposition (After)\nIoU: {iou_after:.2f}% ({error_a}px error)", fontsize=11, fontweight='bold')
+    overlay_target_outline(axes_bot[3])
 
-    # 축 설정 공통 적용
-    for ax in axes.flat:
-        ax.set_xlabel("X (nm)", fontsize=9)
-        ax.set_ylabel("Y (nm)", fontsize=9)
+    # 축 설정 공통화
+    for ax in list(axes_top) + list(axes_bot):
+        ax.set_xlabel("X Position (nm)", fontsize=9)
+        ax.set_ylabel("Y Position (nm)", fontsize=9)
         ax.xaxis.set_major_locator(MultipleLocator(major_x))
         ax.yaxis.set_major_locator(MultipleLocator(major_y))
         if show_grid:
@@ -519,7 +526,7 @@ def generate_comprehensive_plot():
 
     return fig
 
-st.subheader("Lithography & OPC Comprehensive Verification (전·후 비교 검증)")
+st.subheader("Lithography & OPC Comprehensive Verification")
 fig_result = generate_comprehensive_plot()
 st.pyplot(fig_result)
 
@@ -528,7 +535,6 @@ def run_iterative_opc(target_pattern, opt_kernel, opt_th, iterations=8):
     h, w = target_pattern.shape
     cont_mask = target_pattern.copy()
 
-    # 기하학적 초기 세리프 및 선 끝단 해머헤드 유도
     pad = np.pad(target_pattern, 1, mode='constant', constant_values=0)
     for r in range(h):
         for c in range(w):
@@ -566,7 +572,7 @@ def run_iterative_opc(target_pattern, opt_kernel, opt_th, iterations=8):
 
     return (cont_mask >= 0.40).astype(float)
 
-# 12. 컨트롤 및 내보내기 버튼 영역 (모던 스타일 적용)
+# 12. 마스크 제어 및 내보내기 영역
 st.subheader("OPC Modification & Export")
 ctrl_cols = st.columns(5 if layout_mode == "Interactive Grid Drawing" else 4)
 

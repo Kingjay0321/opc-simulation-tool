@@ -57,10 +57,14 @@ elif layout_mode == "Interactive Grid Drawing":
     grid_h = st.sidebar.number_input("Grid Height (Y, rows)", min_value=5, max_value=40, value=20, step=1)
 
     st.subheader("Minesweeper-Style Pixel Grid Editor")
-    st.markdown("💡 **마우스 왼쪽 버튼을 누른 채로 드래그하여 배선을 그리세요. 그린 후 아래 [적용하기] 버튼을 누르면 실시간 반영됩니다.**")
+    st.markdown("💡 **그리기 / 지우개 / 토글 모드를 선택하고 마우스 드래그로 빠르게 패턴을 설정하세요.**")
 
     matrix_key = f"matrix_{grid_w}_{grid_h}"
     if matrix_key not in st.session_state:
+        st.session_state[matrix_key] = [[0 for _ in range(grid_w)] for _ in range(grid_h)]
+
+    # 크기가 달라졌을 때 세션 배열 크기 재조정
+    if len(st.session_state[matrix_key]) != grid_h or len(st.session_state[matrix_key][0]) != grid_w:
         st.session_state[matrix_key] = [[0 for _ in range(grid_w)] for _ in range(grid_h)]
 
     initial_matrix_json = json.dumps(st.session_state[matrix_key])
@@ -68,7 +72,7 @@ elif layout_mode == "Interactive Grid Drawing":
     col_canvas, col_preview = st.columns([1.2, 1])
 
     with col_canvas:
-        # 실시간 데이터 브릿지를 갖춘 HTML5 그리드
+        # 드로잉 캔버스 컴포넌트
         custom_canvas_html = f"""
         <!DOCTYPE html>
         <html>
@@ -84,18 +88,18 @@ elif layout_mode == "Interactive Grid Drawing":
             .controls {{
               margin-bottom: 8px;
               display: flex;
-              gap: 8px;
+              gap: 6px;
               align-items: center;
               flex-wrap: wrap;
             }}
             .btn {{
-              padding: 6px 12px;
+              padding: 6px 10px;
               border: 2px outset #ffffff;
               background: #d4d0c8;
               font-weight: bold;
               cursor: pointer;
               border-radius: 3px;
-              font-size: 12px;
+              font-size: 11px;
             }}
             .btn:active {{
               border-style: inset;
@@ -114,7 +118,7 @@ elif layout_mode == "Interactive Grid Drawing":
               padding: 4px;
               border: 3px inset #c0c0c0;
               width: fit-content;
-              max-height: 480px;
+              max-height: 460px;
               overflow: auto;
             }}
             .cell {{
@@ -136,16 +140,18 @@ elif layout_mode == "Interactive Grid Drawing":
         </head>
         <body>
           <div class="controls">
-            <button id="drawBtn" class="btn active" onclick="setMode(1)">✏️ 배선 그리기 (1)</button>
+            <button id="drawBtn" class="btn active" onclick="setMode(1)">✏️ 그리기 (1)</button>
             <button id="eraseBtn" class="btn" onclick="setMode(0)">🧹 지우개 (0)</button>
-            <button class="btn" onclick="clearGrid()">🔄 리셋</button>
+            <button id="toggleBtn" class="btn" onclick="setMode(2)">🔄 토글 모드</button>
+            <button class="btn" onclick="clearGrid()">🗑️ 리셋</button>
             <span style="font-size:11px; color:#555;">크기: {grid_w} × {grid_h}</span>
           </div>
           <div id="grid-container"></div>
           
           <script>
             let isDrawing = false;
-            let drawMode = 1;
+            let drawMode = 1; // 1: Draw, 0: Erase, 2: Toggle
+            let dragTargetVal = 1;
             const rows = {grid_h};
             const cols = {grid_w};
             let gridData = {initial_matrix_json};
@@ -165,12 +171,17 @@ elif layout_mode == "Interactive Grid Drawing":
                   cell.addEventListener('mousedown', (e) => {{
                     e.preventDefault();
                     isDrawing = true;
-                    applyState(cell, r, c);
+                    if (drawMode === 2) {{
+                      dragTargetVal = gridData[r][c] === 1 ? 0 : 1;
+                      applyCell(cell, r, c, dragTargetVal);
+                    }} else {{
+                      applyCell(cell, r, c, drawMode);
+                    }}
                   }});
 
                   cell.addEventListener('mouseenter', () => {{
                     if (isDrawing) {{
-                      applyState(cell, r, c);
+                      applyCell(cell, r, c, drawMode === 2 ? dragTargetVal : drawMode);
                     }}
                   }});
 
@@ -179,25 +190,27 @@ elif layout_mode == "Interactive Grid Drawing":
               }}
             }}
 
-            function applyState(cell, r, c) {{
-              if (drawMode === 1) {{
+            function applyCell(cell, r, c, val) {{
+              gridData[r][c] = val;
+              if (val === 1) {{
                 cell.classList.add('filled');
-                gridData[r][c] = 1;
               }} else {{
                 cell.classList.remove('filled');
-                gridData[r][c] = 0;
               }}
-              syncToStreamlit();
             }}
 
             window.addEventListener('mouseup', () => {{
-              isDrawing = false;
+              if (isDrawing) {{
+                isDrawing = false;
+                syncToParent();
+              }}
             }});
 
             function setMode(mode) {{
               drawMode = mode;
               document.getElementById('drawBtn').classList.toggle('active', mode === 1);
               document.getElementById('eraseBtn').classList.toggle('active', mode === 0);
+              document.getElementById('toggleBtn').classList.toggle('active', mode === 2);
             }}
 
             function clearGrid() {{
@@ -207,23 +220,16 @@ elif layout_mode == "Interactive Grid Drawing":
                 }}
               }}
               document.querySelectorAll('.cell').forEach(el => el.classList.remove('filled'));
-              syncToStreamlit();
+              syncToParent();
             }}
 
-            function syncToStreamlit() {{
-              try {{
-                const jsonStr = JSON.stringify(gridData);
-                // 부모 Streamlit의 숨겨진 textarea 요소와 동기화
-                const inputs = window.parent.document.querySelectorAll('textarea');
-                for (let input of inputs) {{
-                  if (input.getAttribute('aria-label') === 'grid_data_bridge') {{
-                    input.value = jsonStr;
-                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    break;
-                  }}
-                }}
-              }} catch (err) {{}}
+            function syncToParent() {{
+              const jsonStr = JSON.stringify(gridData);
+              const parentTextarea = window.parent.document.getElementById('hidden_grid_data');
+              if (parentTextarea) {{
+                parentTextarea.value = jsonStr;
+                parentTextarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
+              }}
             }}
 
             createGrid();
@@ -231,30 +237,35 @@ elif layout_mode == "Interactive Grid Drawing":
         </body>
         </html>
         """
-        components.html(custom_canvas_html, height=min(530, grid_h * 18 + 80))
+        components.html(custom_canvas_html, height=min(510, grid_h * 18 + 70))
 
-        # 브릿지 수신용 컨트롤러
-        bridge_val = st.text_area(
-            "grid_data_bridge",
-            value=json.dumps(st.session_state[matrix_key]),
-            label_visibility="collapsed",
-            key=f"bridge_{grid_w}_{grid_h}"
+        # 숨겨진 데이터 수신용 폼 (텍스트 상자 노출 차단)
+        st.markdown(
+            """
+            <style>
+            div[data-testid="stTextArea"]:has(#hidden_grid_data) {
+                display: none !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True
         )
 
-        c_sync1, c_sync2 = st.columns([1.5, 1])
-        with c_sync1:
-            if st.button("💾 그린 패턴 시뮬레이션에 적용하기 (Apply)", type="primary"):
-                try:
-                    parsed = json.loads(bridge_val)
-                    st.session_state[matrix_key] = parsed
-                    st.rerun()
-                except Exception:
-                    pass
+        with st.form("pattern_apply_form"):
+            raw_input = st.text_area(
+                "hidden_grid_data",
+                value=initial_matrix_json,
+                key="hidden_grid_data"
+            )
+            submitted = st.form_submit_button("⚡ 패턴 적용 및 시뮬레이션 갱신 (Apply)", type="primary")
 
-        try:
-            st.session_state[matrix_key] = json.loads(bridge_val)
-        except Exception:
-            pass
+        if submitted and raw_input:
+            try:
+                parsed = json.loads(raw_input)
+                if len(parsed) == grid_h and len(parsed[0]) == grid_w:
+                    st.session_state[matrix_key] = parsed
+            except Exception:
+                pass
 
     target = np.array(st.session_state[matrix_key], dtype=float)
     layout_name = f"Custom_{grid_w}x{grid_h}"
@@ -264,7 +275,7 @@ elif layout_mode == "Interactive Grid Drawing":
         fig_prev, ax_prev = plt.subplots(figsize=(4.5, 4.5 * (grid_h / grid_w)))
         ax_prev.imshow(target, cmap='Blues', origin='upper', interpolation='nearest',
                        extent=[0, grid_w * unit_scale, grid_h * unit_scale, 0])
-        ax_prev.set_title("Current Drawn Target (A)", fontsize=11, fontweight='bold')
+        ax_prev.set_title("Current Target Pattern", fontsize=11, fontweight='bold')
         ax_prev.set_xlabel("X (nm)", fontsize=9)
         ax_prev.set_ylabel("Y (nm)", fontsize=9)
         ax_prev.xaxis.set_minor_locator(MultipleLocator(unit_scale))
@@ -282,7 +293,7 @@ else:
         target[10:20, 10:20] = 1.0
     layout_name = "Uploaded_CSV"
 
-# 4. 세션 상태 관리 (마스크 싱크)
+# 4. 세션 상태 관리 (마스크 동기화)
 if "current_mask" not in st.session_state or st.session_state.get("last_layout") != layout_name:
     st.session_state.current_mask = target.copy()
     st.session_state.last_layout = layout_name
@@ -337,7 +348,7 @@ c_m1.metric("Grid Dimension", f"{w_px} × {h_px} px")
 c_m2.metric("Physical Size", f"{w_px * unit_scale:.1f} × {h_px * unit_scale:.1f} nm")
 c_m3.metric("Pattern Fidelity (IoU)", f"{iou:.2f}%", delta=f"{error_pixels} px Error", delta_color="inverse")
 
-# 6. 하단 4개 플롯 최적 동적 배치
+# 6. 하단 4개 플롯 최적 동적 배치 (길쭉하면 1x4, 정사각이면 2x2)
 def generate_analysis_plot():
     is_tall = aspect_ratio >= 1.4
     if is_tall:

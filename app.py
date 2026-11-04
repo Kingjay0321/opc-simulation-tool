@@ -13,7 +13,7 @@ st.title("Optical Proximity Correction (OPC) Tool")
 st.markdown("**7nm FinFET Standard Cell Metal1 Layout Simulation & Correction Platform**")
 st.caption("Standard Unit: 1 Grid = 3.5 nm × 3.5 nm (λ = 3.5 nm, Metal1 Wire Width = 3 Grid = 10.5 nm)")
 
-unit_scale = 3.5  # nm/pixel
+unit_scale = 3.5  # nm per pixel
 
 # 1. 사이드바 설정
 st.sidebar.header("Simulation Settings")
@@ -138,7 +138,7 @@ def build_editor_component():
 
   <script>
     let isDrawing = false;
-    let drawMode = 1; // 1: Draw, 0: Erase, 2: Toggle
+    let drawMode = 1;
     let currentToggleTarget = 1;
     let rows = 20;
     let cols = 20;
@@ -220,12 +220,10 @@ def build_editor_component():
         }
       }
       document.querySelectorAll('.cell').forEach(el => el.classList.remove('filled'));
-      // 초기화 상태를 파이썬으로 확정 전송
       sendMsg("streamlit:setComponentValue", { value: { action: "clear", matrix: grid } });
     }
 
     function submitToSimulation() {
-      // 현재 브라우저 메모리에 있는 최종 grid 배열을 단방향 전송
       sendMsg("streamlit:setComponentValue", { value: { action: "apply", matrix: grid } });
     }
 
@@ -235,7 +233,6 @@ def build_editor_component():
         if (args) {
           rows = args.rows;
           cols = args.cols;
-          // 최초 1회 또는 강제 리셋 시에만 초기 행렬 수신
           if (!initialized || args.force_reset) {
             grid = JSON.parse(JSON.stringify(args.initial_matrix));
             initialized = true;
@@ -272,7 +269,6 @@ elif layout_mode == "Interactive Grid Drawing":
     st.subheader("Minesweeper-Style Pixel Grid Editor")
     st.markdown("💡 **격자판에서 마우스로 드래그하여 배선을 그리고, [⚡ 시뮬레이션 연산 실행]을 누르면 연산이 시작됩니다.**")
 
-    # 버전 관리 및 세션 상태 키
     if "editor_version" not in st.session_state:
         st.session_state.editor_version = 0
 
@@ -283,7 +279,6 @@ elif layout_mode == "Interactive Grid Drawing":
     if len(st.session_state[matrix_key]) != grid_h or len(st.session_state[matrix_key][0]) != grid_w:
         st.session_state[matrix_key] = [[0 for _ in range(grid_w)] for _ in range(grid_h)]
 
-    # Streamlit Component 호출 (고유 키에 버전을 주입하여 이전 캐시 간섭 방지)
     comp_result = pixel_grid_component(
         rows=int(grid_h),
         cols=int(grid_w),
@@ -300,13 +295,11 @@ elif layout_mode == "Interactive Grid Drawing":
         if mat is not None:
             st.session_state[matrix_key] = mat
             if action == "clear":
-                # 리셋 시 버전 번호를 올려서 새 컴포넌트로 강제 초기화
                 st.session_state.editor_version += 1
                 st.session_state.need_force_reset = True
                 st.session_state.current_mask = np.zeros((grid_h, grid_w), dtype=float)
                 st.rerun()
             elif action == "apply":
-                # Apply 시 파이썬 타겟 및 마스크 배열을 최신으로 완전 갱신
                 st.session_state.current_mask = np.array(mat, dtype=float)
 
     target = np.array(st.session_state[matrix_key], dtype=float)
@@ -476,7 +469,18 @@ st.subheader("Lithography & OPC Analysis Result")
 fig_result = generate_analysis_plot()
 st.pyplot(fig_result)
 
-# 9. 마스크 제어 및 내보내기 파트
+# 9. 자동 최적화 반복 OPC 함수 (역문제 피드백 루프)
+def run_iterative_opc(target_pattern, opt_kernel, opt_th, iterations=7, step_size=0.45):
+    mask = target_pattern.copy()
+    for _ in range(iterations):
+        exp = convolve(mask, opt_kernel, mode='constant', cval=0.0)
+        max_e = np.max(exp) if np.max(exp) > 0 else 1.0
+        sim_printed = ((exp / max_e) >= opt_th).astype(float)
+        error = target_pattern - sim_printed
+        mask = np.clip(mask + step_size * error, 0.0, 1.0)
+    return (mask >= 0.5).astype(float)
+
+# 10. 마스크 제어 및 내보내기 파트
 st.subheader("OPC Modification & Export")
 ctrl_cols = st.columns(5 if layout_mode == "Interactive Grid Drawing" else 4)
 
@@ -486,47 +490,11 @@ with ctrl_cols[0]:
         st.rerun()
 
 with ctrl_cols[1]:
-    if st.button("Apply Advanced OPC (Serif & Line Extension)", type="primary"):
-        # 오른쪽 도면과 동일한 Serif / Anti-serif / Hammerhead 알고리즘 적용
-        from scipy.ndimage import convolve
-        
-        base_mask = target.copy()
-        h, w = base_mask.shape
-        opc_mask = base_mask.copy()
-        
-        # 3x3 이웃 탐색 커널을 통해 볼록 코너(Outer Corner)와 선 끝(Line End) 검출
-        corner_kernel = np.array([
-            [1, 1, 1],
-            [1, 9, 1],
-            [1, 1, 1]
-        ])
-        neighbor_count = convolve(base_mask, corner_kernel, mode='constant', cval=0.0)
-        
-        for r in range(h):
-            for c in range(w):
-                # 1. 선 끝단 및 볼록 모서리 확장 (Outer Serif & Hammerhead: 패턴 살찌우기)
-                if base_mask[r, c] == 0:
-                    # 패턴 바로 바깥 대각선 모서리에 인접한 경우 세리프(귀) 추가
-                    up = base_mask[r-1, c] if r > 0 else 0
-                    down = base_mask[r+1, c] if r < h-1 else 0
-                    left = base_mask[r, c-1] if c > 0 else 0
-                    right = base_mask[r, c+1] if c < w-1 else 0
-                    
-                    # 수평/수직 이웃의 합이 모서리 형태를 띨 때 1픽셀 세리프 돌기 부착
-                    if (up + left == 2) or (up + right == 2) or (down + left == 2) or (down + right == 2):
-                        opc_mask[r, c] = 1.0
-                
-                # 2. 선 끝 수축 방지 (Line-End Extension)
-                if base_mask[r, c] == 1:
-                    # 끝단(세로 또는 가로 끝)이면 1픽셀 연장
-                    if r > 0 and r < h-1:
-                        if base_mask[r-1, c] == 0 and base_mask[r+1, c] == 1 and (r > 1 and base_mask[r-2, c] == 0):
-                            opc_mask[r-1, c] = 1.0
-                        if base_mask[r+1, c] == 0 and base_mask[r-1, c] == 1 and (r < h-2 and base_mask[r+2, c] == 0):
-                            opc_mask[r+1, c] = 1.0
-
-        st.session_state.current_mask = opc_mask
-        st.rerun()
+    if st.button("⚡ 반복 최적화 자동 OPC 실행 (Iterative Loop)", type="primary"):
+        with st.spinner("OPC 역보정 최적화 연산 중..."):
+            optimized_mask = run_iterative_opc(target, kernel, threshold, iterations=7, step_size=0.45)
+            st.session_state.current_mask = optimized_mask
+            st.rerun()
 
 with ctrl_cols[2]:
     mask_csv_buf = io.StringIO()
@@ -561,4 +529,3 @@ with ctrl_cols[btn_col_idx]:
         file_name=f"{layout_name}_analysis_plot.png",
         mime="image/png"
     )
-    

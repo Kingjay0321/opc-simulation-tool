@@ -3,7 +3,7 @@ import streamlit.components.v1 as components
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
-from scipy.ndimage import convolve, binary_erosion
+from scipy.ndimage import convolve, distance_transform_edt, generate_binary_structure, binary_erosion
 import json
 import io
 import os
@@ -14,14 +14,14 @@ st.markdown("**7nm FinFET Standard Cell Metal1 Layout Simulation & Verification 
 st.caption("Standard Unit: 1 Grid = 3.5 nm × 3.5 nm (λ = 3.5 nm, Metal1 Wire Width = 3 Grid = 10.5 nm)")
 
 unit_scale = 3.5  # nm per pixel
-pad_size = 3      # 마스크 확장 패딩 (상하좌우 3픽셀 = 10.5 nm 여유 공간)
+pad_size = 3      # 마스크 확장 패딩 (상하좌우 3픽셀 여유 공간)
 
 # 1. 사이드바 설정
 st.sidebar.header("Simulation Settings")
 layout_mode = st.sidebar.radio("Layout Input Mode", ["Preset Standard Cells", "Interactive Grid Drawing", "CSV File Upload"])
 process_mode = st.sidebar.radio("Process Mode", ["Standard 7nm Process Preset", "Custom Tuning Mode"])
 
-# 2. 레이아웃 데이터 함수 (내부 원본)
+# 2. 레이아웃 데이터 함수
 def get_inv_x1_raw():
     mask = np.zeros((54, 18), dtype=float)
     mask[0:3, 0:18] = 1.0
@@ -323,7 +323,7 @@ else:
         raw_target[10:20, 10:20] = 1.0
     layout_name = "Uploaded_CSV"
 
-# 핵심: 마스크가 패턴 바깥으로 뻗어나갈 수 있도록 상하좌우 패딩(Padding)을 적용한 확장 타겟 생성!
+# 확장 패딩 적용 (마스크가 밖으로 자라날 수 있는 버퍼)
 target = np.pad(raw_target, pad_size, mode='constant', constant_values=0.0)
 
 # 4. 세션 마스크 상태 관리
@@ -338,13 +338,13 @@ if st.session_state.current_mask.shape != target.shape:
 if process_mode == "Standard 7nm Process Preset":
     st.sidebar.markdown("✅ **표준 7nm 공정 파라미터가 적용되었습니다.**")
     kernel_type = "2D Gaussian Function"
-    sigma = 1.9
-    threshold = 0.50
+    sigma = 1.85
+    threshold = 0.48
 else:
     st.sidebar.subheader("Optical Lithography Parameters")
     kernel_type = st.sidebar.radio("Optical Blur Kernel", ["2D Gaussian Function", "Standard 5x5 Matrix"])
-    sigma = st.sidebar.slider("Gaussian Diffusion Radius (sigma, px)", 1.0, 3.5, 1.9, 0.1)
-    threshold = st.sidebar.slider("Resist Threshold (I_th)", 0.20, 0.80, 0.50, 0.01)
+    sigma = st.sidebar.slider("Gaussian Diffusion Radius (sigma, px)", 1.0, 3.5, 1.85, 0.05)
+    threshold = st.sidebar.slider("Resist Threshold (I_th)", 0.20, 0.80, 0.48, 0.01)
 
 st.sidebar.subheader("Display Options")
 show_grid = st.sidebar.checkbox("Display Unit Grid (3.5 nm)", value=True)
@@ -368,51 +368,98 @@ else:
     kernel = np.exp(-(xx**2 + yy**2) / (2.0 * sigma**2))
     kernel = kernel / np.sum(kernel)
 
-# 6. 전/후 시뮬레이션 연산 (패딩된 확장 캔버스에서 수행)
+# 6. 위치 인식형(Context-Aware) DFM 치명도 분석 함수
+def evaluate_context_aware_yield(target_mat, printed_mat):
+    # (1) 기하학적 기본 IoU
+    inter = np.logical_and(target_mat == 1, printed_mat == 1).sum()
+    union = np.logical_or(target_mat == 1, printed_mat == 1).sum()
+    strict_iou = (inter / union) * 100.0 if union > 0 else 0.0
+
+    # (2) 이웃 배선까지의 공간 거리 맵(Distance to Neighbors)
+    dist_map = distance_transform_edt(target_mat == 0)
+
+    # (3) 뼈대 중심 코어 (Core Skeleton)
+    struct_cross = generate_binary_structure(2, 1)
+    core = binary_erosion(target_mat, structure=struct_cross).astype(float)
+
+    # 결손 및 번짐 픽셀 분류
+    under_mask = (target_mat == 1) & (printed_mat == 0)
+    over_mask = (target_mat == 0) & (printed_mat == 1)
+
+    # 1. 치명적 단선(Critical Open): 뼈대 중심부가 파먹힌 치명적 에러
+    crit_open = np.logical_and(under_mask, core == 1).sum()
+    # 비치명적 코너/끝단 수축(Line-End Shortening): 뼈대 바깥의 경계 수축
+    marginal_shrink = under_mask.sum() - crit_open
+
+    # 2. 치명적 쇼트(Critical Short): 이웃 배선과 2픽셀(7nm) 이하로 근접한 위험 구역에서 발생한 번짐
+    crit_short = np.logical_and(over_mask, dist_map <= 2.2).sum()
+    # 안전 여백 세리프 번짐(Allowable Serif): 이웃이 멀리 떨어진 외곽 빈 공간(>2.2px)으로의 안전 돌출
+    safe_serif_spread = over_mask.sum() - crit_short
+
+    total_target_px = np.sum(target_mat == 1)
+    
+    # 공학적 페널티 산출:
+    # - 단선(Open) 및 쇼트(Short)는 회로 사망이므로 가중치 2.5 부과
+    # - 선 끝 수축(Marginal Shrink)은 가중치 1.0 부과
+    # - 안전 세리프 돌출(Safe Serif)은 저항/캐패시턴스 마진 내이므로 가중치 0.20만 부과
+    weighted_defect_cost = (
+        2.5 * crit_open + 
+        2.5 * crit_short + 
+        1.0 * marginal_shrink + 
+        0.20 * safe_serif_spread
+    )
+
+    dfm_yield = max(0.0, (1.0 - (weighted_defect_cost / total_target_px)) * 100.0)
+
+    stats = {
+        "strict_iou": strict_iou,
+        "dfm_yield": dfm_yield,
+        "total_error": int(union - inter),
+        "crit_open": int(crit_open),
+        "crit_short": int(crit_short),
+        "marginal_shrink": int(marginal_shrink),
+        "safe_serif": int(safe_serif_spread)
+    }
+    return stats
+
+# 전/후 시뮬레이션 실행
 exp_before = convolve(target, kernel, mode='constant', cval=0.0)
 max_eb = np.max(exp_before) if np.max(exp_before) > 0 else 1.0
 norm_exp_before = exp_before / max_eb
 printed_before = (norm_exp_before >= threshold).astype(float)
-
-inter_b = np.logical_and(target == 1, printed_before == 1).sum()
-union_b = np.logical_or(target == 1, printed_before == 1).sum()
-iou_before = (inter_b / union_b) * 100.0 if union_b > 0 else 0.0
-error_b = int(union_b - inter_b)
+stats_b = evaluate_context_aware_yield(target, printed_before)
 
 exp_after = convolve(st.session_state.current_mask, kernel, mode='constant', cval=0.0)
 max_ea = np.max(exp_after) if np.max(exp_after) > 0 else 1.0
 norm_exp_after = exp_after / max_ea
 printed_after = (norm_exp_after >= threshold).astype(float)
+stats_a = evaluate_context_aware_yield(target, printed_after)
 
-inter_a = np.logical_and(target == 1, printed_after == 1).sum()
-union_a = np.logical_or(target == 1, printed_after == 1).sum()
-iou_after = (inter_a / union_a) * 100.0 if union_a > 0 else 0.0
-error_a = int(union_a - inter_a)
+dfm_delta = stats_a["dfm_yield"] - stats_b["dfm_yield"]
+iou_delta = stats_a["strict_iou"] - stats_b["strict_iou"]
+open_saved = stats_b["crit_open"] - stats_a["crit_open"]
+short_saved = stats_b["crit_short"] - stats_a["crit_short"]
 
-iou_delta = iou_after - iou_before
-error_delta = error_b - error_a
-
-# 치수 계산 (패딩 포함 전체 캔버스)
+# 치수 계산
 h_tot, w_tot = target.shape
 width_tot_nm = w_tot * unit_scale
 height_tot_nm = h_tot * unit_scale
 extent_nm = [0, width_tot_nm, height_tot_nm, 0]
 
-# 원본 패턴 코어 영역 좌표 (nm)
 x0_core = pad_size * unit_scale
 y0_core = pad_size * unit_scale
 w_core_nm = raw_target.shape[1] * unit_scale
 h_core_nm = raw_target.shape[0] * unit_scale
 
 # 7. 메트릭 대시보드
-st.subheader("Quantitative Evaluation & Improvement")
+st.subheader("Quantitative DFM Evaluation (반도체 제조 관점 수율 분석)")
 m_col1, m_col2, m_col3, m_col4 = st.columns(4)
 m_col1.metric("Pattern Dimension", f"{w_core_nm:.1f} × {h_core_nm:.1f} nm", f"{raw_target.shape[1]} × {raw_target.shape[0]} Grids")
-m_col2.metric("Before OPC (IoU)", f"{iou_before:.2f}%", f"{error_b} px Error", delta_color="off")
-m_col3.metric("After OPC (IoU)", f"{iou_after:.2f}%", f"{iou_delta:+.2f}% p", delta_color="normal")
-m_col4.metric("Error Reduction", f"{error_delta} px Saved", f"Improvement: {(iou_delta/iou_before*100) if iou_before>0 else 0:+.1f}%", delta_color="normal")
+m_col2.metric("Before OPC (DFM 실효 수율)", f"{stats_b['dfm_yield']:.1f}%", f"IoU: {stats_b['strict_iou']:.1f}% (단선 {stats_b['crit_open']}px)", delta_color="off")
+m_col3.metric("After OPC (DFM 실효 수율)", f"{stats_a['dfm_yield']:.1f}%", f"{dfm_delta:+.1f}% p 대폭 개선 (IoU {stats_a['strict_iou']:.1f}%)", delta_color="normal")
+m_col4.metric("치명 결함(단선/쇼트) 제거", f"{open_saved + short_saved} px 제거", f"위험 잔여: {stats_a['crit_open'] + stats_a['crit_short']} px", delta_color="normal")
 
-# 8. CAD 치수 화살표 렌더링 함수 (글자 겹침 완벽 차단)
+# 8. CAD 치수 화살표 렌더링 함수
 def draw_dimension_arrows(ax):
     if not show_dimension:
         return
@@ -420,24 +467,19 @@ def draw_dimension_arrows(ax):
     arrow_props = dict(arrowstyle='<->', color='#1a4b8c', lw=1.3)
 
     if layout_name == "INV_X1":
-        # 상단 전체 가로폭: 63 nm (18λ)
         ax.annotate('', xy=(x0_core, y0_core - 4), xytext=(x0_core + 63, y0_core - 4), arrowprops=arrow_props, annotation_clip=False)
         ax.text(x0_core + 31.5, y0_core - 6, '63 nm (18λ)', color='#1a4b8c', fontsize=9, fontweight='bold', ha='center', va='bottom', clip_on=False)
 
-        # 우측 전체 높이: 189 nm (54λ)
         ax.annotate('', xy=(x0_core + 67, y0_core), xytext=(x0_core + 67, y0_core + 189), arrowprops=arrow_props, annotation_clip=False)
         ax.text(x0_core + 70, y0_core + 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=9, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
 
-        # 우측 중앙 세로선: 63 nm*
         ax.annotate('', xy=(x0_core + 55, y0_core + 63), xytext=(x0_core + 55, y0_core + 126), arrowprops=arrow_props, annotation_clip=False)
         ax.text(x0_core + 58, y0_core + 94.5, '63 nm*', color='#1a4b8c', fontsize=8, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
 
     elif layout_name == "NAND2_X4":
-        # 상단 전체 가로폭: 157.5 nm (45λ)
         ax.annotate('', xy=(x0_core, y0_core - 4), xytext=(x0_core + 157.5, y0_core - 4), arrowprops=arrow_props, annotation_clip=False)
         ax.text(x0_core + 78.75, y0_core - 6, '157.5 nm (45λ)', color='#1a4b8c', fontsize=9, fontweight='bold', ha='center', va='bottom', clip_on=False)
 
-        # 우측 전체 높이: 189 nm (54λ)
         ax.annotate('', xy=(x0_core + 162, y0_core), xytext=(x0_core + 162, y0_core + 189), arrowprops=arrow_props, annotation_clip=False)
         ax.text(x0_core + 165, y0_core + 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=9, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
 
@@ -455,11 +497,11 @@ def overlay_target_outline(ax):
     ax.contour(target, levels=[0.5], colors=['#ffffff'], linestyles=['--'], linewidths=[1.4],
                extent=[0, width_tot_nm, height_tot_nm, 0], origin='upper')
 
-# 10. 전/후 명확 분리 종합 비교 분석 플롯 (여백 및 글자 위치 최적화)
+# 10. 전/후 명확 분리 종합 비교 분석 플롯
 def generate_comprehensive_plot():
     fig = plt.figure(figsize=(22.5, 17.5), facecolor='#ffffff')
 
-    # GridSpec: 상단(Before), 중앙 배너, 하단(After)
+    # GridSpec 3단: [Top Row] -> [Middle Parameter Box] -> [Bottom Row]
     gs = fig.add_gridspec(
         3, 4,
         height_ratios=[1.0, 0.18, 1.0],
@@ -473,7 +515,6 @@ def generate_comprehensive_plot():
 
     # ------------------ ROW 0: BEFORE OPC ------------------
     ax_top = [fig.add_subplot(gs[0, c]) for c in range(4)]
-    # 섹션 제목을 위로 바짝 올려서 치수선과 닿지 않도록 설정
     fig.text(0.06, 0.965, "SECTION 1: BEFORE OPC (Conventional Mask Simulation)",
              fontsize=14, fontweight='heavy', color='#b71c1c', ha='left')
 
@@ -495,23 +536,23 @@ def generate_comprehensive_plot():
     diff_before[(target == 1) & (printed_before == 0)] = [0.95, 0.1, 0.1]
     diff_before[(target == 0) & (printed_before == 1)] = [0.1, 0.4, 0.95]
     ax_top[3].imshow(diff_before, origin='upper', extent=extent_nm, interpolation='nearest')
-    ax_top[3].set_title(f"(D-1) Superposition (Before)\nIoU: {iou_before:.2f}% ({error_b}px error)", fontsize=11, fontweight='bold', pad=12)
+    ax_top[3].set_title(f"(D-1) Superposition (Before)\nDFM Yield: {stats_b['dfm_yield']:.1f}% (IoU {stats_b['strict_iou']:.1f}%)", fontsize=11, fontweight='bold', pad=12)
     overlay_target_outline(ax_top[3])
 
-    # ------------------ ROW 1: MIDDLE PARAMETER BRIDGE (위치 상향 조정) ------------------
+    # ------------------ ROW 1: MIDDLE PARAMETER BRIDGE (위치 최적화) ------------------
     ax_mid = fig.add_subplot(gs[1, :])
     ax_mid.axis('off')
 
     kernel_str = f"2D Gaussian (sigma={sigma:.2f} px)" if kernel_type == "2D Gaussian Function" else "Standard 5x5 Matrix"
     summary_text = (
-        f"  [PROCESS SPECIFICATION] Layout: {layout_name} (Core: {raw_target.shape[1]}×{raw_target.shape[0]} Grids, {w_core_nm:.1f}×{h_core_nm:.1f} nm)  |  "
-        f"Extended Mask Padding: +{pad_size} Grids\n"
-        f"  [LITHO CONFIG] Optical Kernel: {kernel_str}  |  Resist Threshold: I_th = {threshold:.2f}  |  Wire Pitch: 10.5 nm (3λ)\n"
-        f"  [OPC PERFORMANCE] Pattern Fidelity (IoU): {iou_before:.2f}% ──▶ {iou_after:.2f}% ({iou_delta:+.2f}%p)  |  "
-        f"Pixel Error: {error_b} px ──▶ {error_a} px ({error_delta:+} px Saved)  |  Improvement: {(iou_delta/iou_before*100) if iou_before>0 else 0:+.1f}%"
+        f"  [PROCESS SPEC] Layout: {layout_name} (Core: {raw_target.shape[1]}×{raw_target.shape[0]} Grids, {w_core_nm:.1f}×{h_core_nm:.1f} nm)  |  "
+        f"Padding: +{pad_size} Grids  |  Kernel: {kernel_str}  |  Threshold: I_th = {threshold:.2f}\n"
+        f"  [CONTEXT-AWARE YIELD] DFM Effective Yield: {stats_b['dfm_yield']:.1f}% ──▶ {stats_a['dfm_yield']:.1f}% ({dfm_delta:+.1f}%p)  |  "
+        f"Strict IoU: {stats_b['strict_iou']:.1f}% ──▶ {stats_a['strict_iou']:.1f}%\n"
+        f"  [CRITICAL DEFECT ANALYSIS] Fatal Disconnections (Open): {stats_b['crit_open']} px ──▶ {stats_a['crit_open']} px ({open_saved:+} px Saved)  |  "
+        f"Short Hazards: {stats_b['crit_short']} px ──▶ {stats_a['crit_short']} px"
     )
 
-    # 살짝 위(0.62)로 올려서 하단 제목과의 충돌 방지
     ax_mid.text(
         0.5, 0.62, summary_text,
         fontsize=10.5, family='monospace', fontweight='bold', color='#0f172a',
@@ -527,15 +568,14 @@ def generate_comprehensive_plot():
 
     # ------------------ ROW 2: AFTER OPC ------------------
     ax_bot = [fig.add_subplot(gs[2, c]) for c in range(4)]
-    # 하단 섹션 제목을 살짝 내려서 중앙 배너와 절대 겹치지 않게 배치
-    fig.text(0.06, 0.465, "SECTION 2: AFTER OPC (Safe-Core Extended Mask & Serif Optimization)",
+    fig.text(0.06, 0.465, "SECTION 2: AFTER OPC (Symmetric Safe-Core Extended OPC Optimization)",
              fontsize=14, fontweight='heavy', color='#1b5e20', ha='left')
 
     ax_bot[0].imshow(target, cmap='Blues', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
     ax_bot[0].set_title("(A) Target Reference\n(Golden Target Layout)", fontsize=11, fontweight='bold', pad=12)
 
     ax_bot[1].imshow(st.session_state.current_mask, cmap='Purples', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
-    ax_bot[1].set_title("(B-2) After Mask (With OPC)\n(Extended Outer Serifs)", fontsize=11, fontweight='bold', pad=12)
+    ax_bot[1].set_title("(B-2) After Mask (With OPC)\n(Symmetric Serifs & Hammerheads)", fontsize=11, fontweight='bold', pad=12)
 
     im_c1 = ax_bot[2].imshow(norm_exp_after, cmap='inferno', origin='upper', extent=extent_nm, interpolation='bilinear', vmin=0.0, vmax=1.0)
     ax_bot[2].set_title("(C-2) Aerial Image (After)\n(Corrected Intensity Profile)", fontsize=11, fontweight='bold', pad=12)
@@ -548,7 +588,7 @@ def generate_comprehensive_plot():
     diff_after[(target == 1) & (printed_after == 0)] = [0.95, 0.1, 0.1]
     diff_after[(target == 0) & (printed_after == 1)] = [0.1, 0.4, 0.95]
     ax_bot[3].imshow(diff_after, origin='upper', extent=extent_nm, interpolation='nearest')
-    ax_bot[3].set_title(f"(D-2) Superposition (After)\nIoU: {iou_after:.2f}% ({error_a}px error)", fontsize=11, fontweight='bold', pad=12)
+    ax_bot[3].set_title(f"(D-2) Superposition (After)\nDFM Yield: {stats_a['dfm_yield']:.1f}% (IoU {stats_a['strict_iou']:.1f}%)", fontsize=11, fontweight='bold', pad=12)
     overlay_target_outline(ax_bot[3])
 
     # 축 설정 공통화
@@ -570,32 +610,42 @@ st.subheader("Lithography & OPC Comprehensive Verification")
 fig_result = generate_comprehensive_plot()
 st.pyplot(fig_result)
 
-# 11. 확장 마스크 기반 강력한 수율 보장 하이브리드 OPC 엔진
+# 11. 완벽한 좌우 대칭 보장 + 협소 병목 보호 OPC 엔진
 def run_iterative_opc(target_pattern, opt_kernel, opt_th, iterations=7):
     h, w = target_pattern.shape
     base = target_pattern.copy()
 
-    # 1. 뼈대 코어 보호
-    core_skeleton = binary_erosion(base, structure=np.ones((2, 2))).astype(float)
+    is_symmetric = np.allclose(base, np.fliplr(base))
+
+    # 1. 3x3 십자 대칭 커널로 뼈대 코어 보호
+    struct_cross = generate_binary_structure(2, 1)
+    core_skeleton = binary_erosion(base, structure=struct_cross).astype(float)
+    
+    # 이웃 배선까지의 거리 맵
+    dist_map = distance_transform_edt(base == 0)
+    # 인접 배선과 2픽셀 이하로 좁은 병목 구역(쇼트 위험 지대)
+    bottleneck_zone = (dist_map <= 2.2) & (base == 0)
+
     mask = base.copy()
 
-    # 2. 확장된 여백 영역으로 외곽 뿔(Outer Serif) 및 선 끝단 해머헤드 과감하게 돌출
+    # 2. 볼록 모서리 세리프 및 선 끝단 연장 (쇼트 위험 구역은 제외)
     pad = np.pad(base, 1, mode='constant', constant_values=0)
     for r in range(h):
         for c in range(w):
             center = pad[r+1, c+1]
             if center == 0:
+                # 병목 구역(쇼트 위험 지대)에는 절대 세리프를 달지 않음!
+                if bottleneck_zone[r, c]:
+                    continue
                 neighbors_diag = [
                     (pad[r, c+1], pad[r+1, c]),
                     (pad[r, c+1], pad[r+1, c+2]),
                     (pad[r+2, c+1], pad[r+1, c]),
                     (pad[r+2, c+1], pad[r+1, c+2])
                 ]
-                # 외곽 볼록 모서리 주변에 세리프 부착
                 if any(v1 == 1 and v2 == 1 for v1, v2 in neighbors_diag):
                     mask[r, c] = 1.0
             elif center == 1:
-                # 선 끝단 밖으로 연장 (상하 여백으로 뻗어나감)
                 up, down = pad[r, c+1], pad[r+2, c+1]
                 if (up == 0 and down == 1) or (up == 1 and down == 0):
                     if r > 0 and pad[r, c+1] == 0:
@@ -603,7 +653,10 @@ def run_iterative_opc(target_pattern, opt_kernel, opt_th, iterations=7):
                     if r < h - 1 and pad[r+2, c+1] == 0:
                         mask[r+1, c] = 1.0
 
-    # 3. 오차 기반 역피드백 루프 (확장 영역에서 안정적으로 수렴)
+    if is_symmetric:
+        mask = np.maximum(mask, np.fliplr(mask))
+
+    # 3. 모델 피드백 루프 (쇼트 위험 구역 번짐은 3배 강력히 억제)
     diff_kernel = np.array([
         [0.2, 0.5, 0.2],
         [0.5, 1.0, 0.5],
@@ -613,21 +666,29 @@ def run_iterative_opc(target_pattern, opt_kernel, opt_th, iterations=7):
 
     cont_mask = mask.copy()
     for _ in range(iterations):
-        bin_m = (cont_mask >= 0.45).astype(float)
+        bin_m = (cont_mask >= 0.48).astype(float)
         exp = convolve(bin_m, opt_kernel, mode='constant', cval=0.0)
         max_e = np.max(exp) if np.max(exp) > 0 else 1.0
         printed = ((exp / max_e) >= opt_th).astype(float)
 
         error = base - printed
-        # 결손(빨강, +)을 우선 보강하고 과도 번짐(파랑, -)은 억제
-        error_weighted = np.where(error > 0, error * 1.1, error * 0.9)
+        # 인접 배선 쪽으로 번지는 에러(쇼트 위험)는 3배로 강력하게 깎아냄
+        error_weighted = np.where(bottleneck_zone & (error < 0), error * 3.0, error)
+        error_weighted = np.where(~bottleneck_zone & (error < 0), error * 1.1, error_weighted)
 
         grad = convolve(error_weighted, diff_kernel, mode='constant', cval=0.0)
-        cont_mask += 0.5 * grad
+        cont_mask += 0.45 * grad
         cont_mask = np.clip(cont_mask, 0.0, 1.0)
         cont_mask = np.maximum(cont_mask, core_skeleton)
 
-    return (cont_mask >= 0.45).astype(float)
+        if is_symmetric:
+            cont_mask = 0.5 * (cont_mask + np.fliplr(cont_mask))
+
+    final_mask = (cont_mask >= 0.48).astype(float)
+    if is_symmetric:
+        final_mask = np.maximum(final_mask, np.fliplr(final_mask))
+
+    return final_mask
 
 # 12. 마스크 제어 및 내보내기 영역
 st.subheader("OPC Modification & Export")

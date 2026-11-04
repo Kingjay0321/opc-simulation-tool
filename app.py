@@ -14,25 +14,24 @@ st.markdown("**7nm FinFET Standard Cell Metal1 Layout Simulation & Verification 
 st.caption("Standard Unit: 1 Grid = 3.5 nm × 3.5 nm (λ = 3.5 nm, Metal1 Wire Width = 3 Grid = 10.5 nm)")
 
 unit_scale = 3.5  # nm per pixel
+pad_size = 3      # 마스크 확장 패딩 (상하좌우 3픽셀 = 10.5 nm 여유 공간)
 
 # 1. 사이드바 설정
 st.sidebar.header("Simulation Settings")
 layout_mode = st.sidebar.radio("Layout Input Mode", ["Preset Standard Cells", "Interactive Grid Drawing", "CSV File Upload"])
-
-# 공정 모드 선택: 표준 공정 vs 커스텀 공정
 process_mode = st.sidebar.radio("Process Mode", ["Standard 7nm Process Preset", "Custom Tuning Mode"])
 
-# 2. 프리셋 레이아웃 정의
-def get_inv_x1():
+# 2. 레이아웃 데이터 함수 (내부 원본)
+def get_inv_x1_raw():
     mask = np.zeros((54, 18), dtype=float)
-    mask[0:3, 0:18] = 1.0     # 상단 바 (y: 0~10.5 nm)
-    mask[51:54, 0:18] = 1.0   # 하단 바 (y: 178.5~189 nm)
-    mask[3:21, 3:6] = 1.0    # 좌상단 세로선
-    mask[33:51, 3:6] = 1.0   # 좌하단 세로선
-    mask[18:36, 12:15] = 1.0 # 우측 중앙 세로선
+    mask[0:3, 0:18] = 1.0
+    mask[51:54, 0:18] = 1.0
+    mask[3:21, 3:6] = 1.0
+    mask[33:51, 3:6] = 1.0
+    mask[18:36, 12:15] = 1.0
     return mask
 
-def get_nand2_x4():
+def get_nand2_x4_raw():
     mask = np.zeros((54, 45), dtype=float)
     mask[0:3, 0:45] = 1.0
     mask[51:54, 0:45] = 1.0
@@ -49,7 +48,7 @@ def get_nand2_x4():
     mask[30:48, 30:33] = 1.0
     return mask
 
-# 양방향 통신 컴포넌트 생성 (모던 UI)
+# 양방향 통신 컴포넌트 생성
 def build_editor_component():
     current_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else os.getcwd()
     comp_dir = os.path.join(current_dir, "pixel_grid_component")
@@ -266,7 +265,7 @@ pixel_grid_component = build_editor_component()
 # 3. 레이아웃 모드별 타겟 처리
 if layout_mode == "Preset Standard Cells":
     preset_choice = st.sidebar.selectbox("Select Target Cell", ["INV_X1", "NAND2_X4"])
-    target = get_inv_x1() if preset_choice == "INV_X1" else get_nand2_x4()
+    raw_target = get_inv_x1_raw() if preset_choice == "INV_X1" else get_nand2_x4_raw()
     layout_name = preset_choice
 
 elif layout_mode == "Interactive Grid Drawing":
@@ -276,7 +275,7 @@ elif layout_mode == "Interactive Grid Drawing":
     st.sidebar.caption("📏 **최대 허용 크기:** Max X: 40 cols, Max Y: 60 rows (단위: 1 grid = 3.5 nm)")
 
     st.subheader("Minesweeper-Style Pixel Grid Editor")
-    st.markdown("💡 **격자판에서 마우스 드래그로 배선을 그리고, [⚡ 시뮬레이션 연산 적용]을 누르면 연산이 시작됩니다.**")
+    st.markdown("💡 **격자판에서 배선을 그리고 [⚡ 시뮬레이션 연산 적용]을 누르면 연산이 시작됩니다.**")
 
     if "editor_version" not in st.session_state:
         st.session_state.editor_version = 0
@@ -306,43 +305,46 @@ elif layout_mode == "Interactive Grid Drawing":
             if action == "clear":
                 st.session_state.editor_version += 1
                 st.session_state.need_force_reset = True
-                st.session_state.current_mask = np.zeros((grid_h, grid_w), dtype=float)
+                st.session_state.current_mask = None
                 st.rerun()
             elif action == "apply":
-                st.session_state.current_mask = np.array(mat, dtype=float)
+                st.session_state.current_mask = None
 
-    target = np.array(st.session_state[matrix_key], dtype=float)
+    raw_target = np.array(st.session_state[matrix_key], dtype=float)
     layout_name = f"Custom_{grid_w}x{grid_h}"
 
 else:
     uploaded_file = st.sidebar.file_uploader("Upload CSV (0 and 1 matrix)", type=["csv"])
     if uploaded_file is not None:
-        target = np.genfromtxt(uploaded_file, delimiter=",").astype(float)
-        target = np.nan_to_num(target, nan=0.0)
+        raw_target = np.genfromtxt(uploaded_file, delimiter=",").astype(float)
+        raw_target = np.nan_to_num(raw_target, nan=0.0)
     else:
-        target = np.zeros((30, 30), dtype=float)
-        target[10:20, 10:20] = 1.0
+        raw_target = np.zeros((30, 30), dtype=float)
+        raw_target[10:20, 10:20] = 1.0
     layout_name = "Uploaded_CSV"
 
+# 핵심: 마스크가 패턴 바깥으로 뻗어나갈 수 있도록 상하좌우 패딩(Padding)을 적용한 확장 타겟 생성!
+target = np.pad(raw_target, pad_size, mode='constant', constant_values=0.0)
+
 # 4. 세션 마스크 상태 관리
-if "current_mask" not in st.session_state or st.session_state.get("last_layout") != layout_name:
+if "current_mask" not in st.session_state or st.session_state.current_mask is None or st.session_state.get("last_layout") != layout_name:
     st.session_state.current_mask = target.copy()
     st.session_state.last_layout = layout_name
 
 if st.session_state.current_mask.shape != target.shape:
     st.session_state.current_mask = target.copy()
 
-# 5. 광학 공정 파라미터 분기
+# 5. 광학 공정 파라미터
 if process_mode == "Standard 7nm Process Preset":
-    st.sidebar.markdown("✅ **표준 7nm 공정 파라미터가 자동 적용되었습니다.**")
+    st.sidebar.markdown("✅ **표준 7nm 공정 파라미터가 적용되었습니다.**")
     kernel_type = "2D Gaussian Function"
-    sigma = 2.0  # 적정 회절 및 코너 라운딩 유도
-    threshold = 0.52  # 3픽셀 폭 기준 균형 임계값
+    sigma = 1.9
+    threshold = 0.50
 else:
     st.sidebar.subheader("Optical Lithography Parameters")
     kernel_type = st.sidebar.radio("Optical Blur Kernel", ["2D Gaussian Function", "Standard 5x5 Matrix"])
-    sigma = st.sidebar.slider("Gaussian Diffusion Radius (sigma, px)", 1.0, 3.5, 2.0, 0.1)
-    threshold = st.sidebar.slider("Resist Threshold (I_th)", 0.20, 0.80, 0.52, 0.01)
+    sigma = st.sidebar.slider("Gaussian Diffusion Radius (sigma, px)", 1.0, 3.5, 1.9, 0.1)
+    threshold = st.sidebar.slider("Resist Threshold (I_th)", 0.20, 0.80, 0.50, 0.01)
 
 st.sidebar.subheader("Display Options")
 show_grid = st.sidebar.checkbox("Display Unit Grid (3.5 nm)", value=True)
@@ -366,7 +368,7 @@ else:
     kernel = np.exp(-(xx**2 + yy**2) / (2.0 * sigma**2))
     kernel = kernel / np.sum(kernel)
 
-# 6. 전/후 듀얼 시뮬레이션 연산
+# 6. 전/후 시뮬레이션 연산 (패딩된 확장 캔버스에서 수행)
 exp_before = convolve(target, kernel, mode='constant', cval=0.0)
 max_eb = np.max(exp_before) if np.max(exp_before) > 0 else 1.0
 norm_exp_before = exp_before / max_eb
@@ -390,20 +392,27 @@ error_a = int(union_a - inter_a)
 iou_delta = iou_after - iou_before
 error_delta = error_b - error_a
 
-h_px, w_px = target.shape
-width_nm = w_px * unit_scale
-height_nm = h_px * unit_scale
-extent_nm = [0, width_nm, height_nm, 0]
+# 치수 계산 (패딩 포함 전체 캔버스)
+h_tot, w_tot = target.shape
+width_tot_nm = w_tot * unit_scale
+height_tot_nm = h_tot * unit_scale
+extent_nm = [0, width_tot_nm, height_tot_nm, 0]
+
+# 원본 패턴 코어 영역 좌표 (nm)
+x0_core = pad_size * unit_scale
+y0_core = pad_size * unit_scale
+w_core_nm = raw_target.shape[1] * unit_scale
+h_core_nm = raw_target.shape[0] * unit_scale
 
 # 7. 메트릭 대시보드
 st.subheader("Quantitative Evaluation & Improvement")
 m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-m_col1.metric("Physical Size", f"{width_nm:.1f} × {height_nm:.1f} nm", f"{w_px} × {h_px} Grid")
+m_col1.metric("Pattern Dimension", f"{w_core_nm:.1f} × {h_core_nm:.1f} nm", f"{raw_target.shape[1]} × {raw_target.shape[0]} Grids")
 m_col2.metric("Before OPC (IoU)", f"{iou_before:.2f}%", f"{error_b} px Error", delta_color="off")
 m_col3.metric("After OPC (IoU)", f"{iou_after:.2f}%", f"{iou_delta:+.2f}% p", delta_color="normal")
 m_col4.metric("Error Reduction", f"{error_delta} px Saved", f"Improvement: {(iou_delta/iou_before*100) if iou_before>0 else 0:+.1f}%", delta_color="normal")
 
-# 8. CAD 치수 화살표 렌더링 함수
+# 8. CAD 치수 화살표 렌더링 함수 (글자 겹침 완벽 차단)
 def draw_dimension_arrows(ax):
     if not show_dimension:
         return
@@ -411,82 +420,72 @@ def draw_dimension_arrows(ax):
     arrow_props = dict(arrowstyle='<->', color='#1a4b8c', lw=1.3)
 
     if layout_name == "INV_X1":
-        ax.annotate('', xy=(0, -8), xytext=(63, -8), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(31.5, -11, '63 nm (18λ)', color='#1a4b8c', fontsize=9.5, fontweight='bold', ha='center', va='bottom', clip_on=False)
+        # 상단 전체 가로폭: 63 nm (18λ)
+        ax.annotate('', xy=(x0_core, y0_core - 4), xytext=(x0_core + 63, y0_core - 4), arrowprops=arrow_props, annotation_clip=False)
+        ax.text(x0_core + 31.5, y0_core - 6, '63 nm (18λ)', color='#1a4b8c', fontsize=9, fontweight='bold', ha='center', va='bottom', clip_on=False)
 
-        ax.annotate('', xy=(68, 0), xytext=(68, 189), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(72, 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=9.5, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
+        # 우측 전체 높이: 189 nm (54λ)
+        ax.annotate('', xy=(x0_core + 67, y0_core), xytext=(x0_core + 67, y0_core + 189), arrowprops=arrow_props, annotation_clip=False)
+        ax.text(x0_core + 70, y0_core + 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=9, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
 
-        ax.annotate('', xy=(56, 63), xytext=(56, 126), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(59, 94.5, '63 nm*', color='#1a4b8c', fontsize=8.5, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
-
-        ax.annotate('', xy=(21, 136), xytext=(42, 136), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(31.5, 133, '21 nm*', color='#1a4b8c', fontsize=9.5, fontweight='bold', ha='center', va='bottom', clip_on=False)
+        # 우측 중앙 세로선: 63 nm*
+        ax.annotate('', xy=(x0_core + 55, y0_core + 63), xytext=(x0_core + 55, y0_core + 126), arrowprops=arrow_props, annotation_clip=False)
+        ax.text(x0_core + 58, y0_core + 94.5, '63 nm*', color='#1a4b8c', fontsize=8, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
 
     elif layout_name == "NAND2_X4":
-        ax.annotate('', xy=(0, -8), xytext=(157.5, -8), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(78.75, -11, '157.5 nm (45λ)', color='#1a4b8c', fontsize=9.5, fontweight='bold', ha='center', va='bottom', clip_on=False)
+        # 상단 전체 가로폭: 157.5 nm (45λ)
+        ax.annotate('', xy=(x0_core, y0_core - 4), xytext=(x0_core + 157.5, y0_core - 4), arrowprops=arrow_props, annotation_clip=False)
+        ax.text(x0_core + 78.75, y0_core - 6, '157.5 nm (45λ)', color='#1a4b8c', fontsize=9, fontweight='bold', ha='center', va='bottom', clip_on=False)
 
-        ax.annotate('', xy=(164, 0), xytext=(164, 189), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(168, 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=9.5, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
-
-        ax.annotate('', xy=(10.5, 172), xytext=(42, 172), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(26.25, 169, '31.5 nm*', color='#1a4b8c', fontsize=9.5, fontweight='bold', ha='center', va='bottom', clip_on=False)
+        # 우측 전체 높이: 189 nm (54λ)
+        ax.annotate('', xy=(x0_core + 162, y0_core), xytext=(x0_core + 162, y0_core + 189), arrowprops=arrow_props, annotation_clip=False)
+        ax.text(x0_core + 165, y0_core + 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=9, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
 
     else:
-        offset_top = max(7.0, height_nm * 0.05)
-        offset_right = max(7.0, width_nm * 0.05)
+        ax.annotate('', xy=(x0_core, y0_core - 4), xytext=(x0_core + w_core_nm, y0_core - 4), arrowprops=arrow_props, annotation_clip=False)
+        ax.text(x0_core + w_core_nm / 2.0, y0_core - 6, f'{w_core_nm:.1f} nm', color='#1a4b8c', fontsize=9, fontweight='bold', ha='center', va='bottom', clip_on=False)
 
-        ax.annotate('', xy=(0, -offset_top), xytext=(width_nm, -offset_top), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(width_nm / 2.0, -(offset_top + 3.0), f'{width_nm:.1f} nm ({w_px}λ)',
-                color='#1a4b8c', fontsize=9.5, fontweight='bold', ha='center', va='bottom', clip_on=False)
+        ax.annotate('', xy=(x0_core + w_core_nm + 4, y0_core), xytext=(x0_core + w_core_nm + 4, y0_core + h_core_nm), arrowprops=arrow_props, annotation_clip=False)
+        ax.text(x0_core + w_core_nm + 7, y0_core + h_core_nm / 2.0, f'{h_core_nm:.1f} nm', color='#1a4b8c', fontsize=9, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
 
-        ax.annotate('', xy=(width_nm + offset_right, 0), xytext=(width_nm + offset_right, height_nm), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(width_nm + offset_right + 3.0, height_nm / 2.0, f'{height_nm:.1f} nm ({h_px}λ)',
-                color='#1a4b8c', fontsize=9.5, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
-
-# 9. 타겟 외곽선 오버레이 헬퍼
+# 9. 타겟 외곽선 오버레이
 def overlay_target_outline(ax):
     if not show_outline:
         return
     ax.contour(target, levels=[0.5], colors=['#ffffff'], linestyles=['--'], linewidths=[1.4],
-               extent=[0, width_nm, height_nm, 0], origin='upper')
+               extent=[0, width_tot_nm, height_tot_nm, 0], origin='upper')
 
-# 10. 전/후 명확 분리 종합 비교 분석 플롯 (중앙 파라미터 브릿지 카드 탑재)
+# 10. 전/후 명확 분리 종합 비교 분석 플롯 (여백 및 글자 위치 최적화)
 def generate_comprehensive_plot():
-    # INV_X1 세로 비율을 고려한 캔버스 사이즈 배분
-    is_very_tall = (height_nm / width_nm) >= 2.0
-    fig_w = 22.0
-    fig_h = 17.5 if is_very_tall else 16.0
+    fig = plt.figure(figsize=(22.5, 17.5), facecolor='#ffffff')
 
-    fig = plt.figure(figsize=(fig_w, fig_h), facecolor='#ffffff')
-
-    # GridSpec 3단 구조: [Top Row: Before] -> [Middle Row: Parameter Box] -> [Bottom Row: After]
+    # GridSpec: 상단(Before), 중앙 배너, 하단(After)
     gs = fig.add_gridspec(
         3, 4,
-        height_ratios=[1.0, 0.16, 1.0],
-        hspace=0.38,
+        height_ratios=[1.0, 0.18, 1.0],
+        hspace=0.45,
         wspace=0.22,
-        left=0.06, right=0.95, top=0.94, bottom=0.05
+        left=0.06, right=0.95, top=0.93, bottom=0.04
     )
 
-    major_x = 21.0 if width_nm > 40 else 10.5
-    major_y = 31.5 if height_nm > 60 else 10.5
+    major_x = 21.0 if width_tot_nm > 50 else 10.5
+    major_y = 31.5 if height_tot_nm > 70 else 10.5
 
     # ------------------ ROW 0: BEFORE OPC ------------------
     ax_top = [fig.add_subplot(gs[0, c]) for c in range(4)]
+    # 섹션 제목을 위로 바짝 올려서 치수선과 닿지 않도록 설정
     fig.text(0.06, 0.965, "SECTION 1: BEFORE OPC (Conventional Mask Simulation)",
-             fontsize=13.5, fontweight='heavy', color='#b71c1c', ha='left')
+             fontsize=14, fontweight='heavy', color='#b71c1c', ha='left')
 
     ax_top[0].imshow(target, cmap='Blues', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
-    ax_top[0].set_title("(A) Target Pattern\n(Design Specification)", fontsize=11, fontweight='bold', pad=10)
+    ax_top[0].set_title("(A) Target Pattern\n(Design Specification)", fontsize=11, fontweight='bold', pad=12)
     draw_dimension_arrows(ax_top[0])
 
     ax_top[1].imshow(target, cmap='Purples', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
-    ax_top[1].set_title("(B-1) Before Mask (No OPC)\n(Raw Layout Mask)", fontsize=11, fontweight='bold', pad=10)
+    ax_top[1].set_title("(B-1) Before Mask (No OPC)\n(Raw Layout Mask)", fontsize=11, fontweight='bold', pad=12)
 
     im_c0 = ax_top[2].imshow(norm_exp_before, cmap='inferno', origin='upper', extent=extent_nm, interpolation='bilinear', vmin=0.0, vmax=1.0)
-    ax_top[2].set_title("(C-1) Aerial Image (Before)\n(Light Intensity Profile)", fontsize=11, fontweight='bold', pad=10)
+    ax_top[2].set_title("(C-1) Aerial Image (Before)\n(Light Intensity Profile)", fontsize=11, fontweight='bold', pad=12)
     overlay_target_outline(ax_top[2])
     cbar0 = fig.colorbar(im_c0, ax=ax_top[2], fraction=0.046, pad=0.04)
     cbar0.ax.tick_params(labelsize=9)
@@ -496,31 +495,31 @@ def generate_comprehensive_plot():
     diff_before[(target == 1) & (printed_before == 0)] = [0.95, 0.1, 0.1]
     diff_before[(target == 0) & (printed_before == 1)] = [0.1, 0.4, 0.95]
     ax_top[3].imshow(diff_before, origin='upper', extent=extent_nm, interpolation='nearest')
-    ax_top[3].set_title(f"(D-1) Superposition (Before)\nIoU: {iou_before:.2f}% ({error_b}px error)", fontsize=11, fontweight='bold', pad=10)
+    ax_top[3].set_title(f"(D-1) Superposition (Before)\nIoU: {iou_before:.2f}% ({error_b}px error)", fontsize=11, fontweight='bold', pad=12)
     overlay_target_outline(ax_top[3])
 
-    # ------------------ ROW 1: MIDDLE PARAMETER BRIDGE (파란 원 위치) ------------------
-    # 가운데 4개 컬럼을 통으로 합친 배너 축 생성
+    # ------------------ ROW 1: MIDDLE PARAMETER BRIDGE (위치 상향 조정) ------------------
     ax_mid = fig.add_subplot(gs[1, :])
     ax_mid.axis('off')
 
     kernel_str = f"2D Gaussian (sigma={sigma:.2f} px)" if kernel_type == "2D Gaussian Function" else "Standard 5x5 Matrix"
     summary_text = (
-        f"  [PROCESS CONFIG] Layout: {layout_name} ({w_px}×{h_px} Grids, {width_nm:.1f}×{height_nm:.1f} nm)  |  "
-        f"1 Grid = {unit_scale} nm  |  Wire Width = 10.5 nm (3λ)  |  Kernel: {kernel_str}  |  Threshold: I_th = {threshold:.2f}\n"
-        f"  [OPC PERFORMANCE] Pattern Fidelity (IoU): {iou_before:.2f}%  ──▶  {iou_after:.2f}% ({iou_delta:+.2f}%p)  |  "
-        f"Pixel Error: {error_b} px  ──▶  {error_a} px ({error_delta:+} px Saved)  |  "
-        f"Improvement: {(iou_delta/iou_before*100) if iou_before>0 else 0:+.1f}%"
+        f"  [PROCESS SPECIFICATION] Layout: {layout_name} (Core: {raw_target.shape[1]}×{raw_target.shape[0]} Grids, {w_core_nm:.1f}×{h_core_nm:.1f} nm)  |  "
+        f"Extended Mask Padding: +{pad_size} Grids\n"
+        f"  [LITHO CONFIG] Optical Kernel: {kernel_str}  |  Resist Threshold: I_th = {threshold:.2f}  |  Wire Pitch: 10.5 nm (3λ)\n"
+        f"  [OPC PERFORMANCE] Pattern Fidelity (IoU): {iou_before:.2f}% ──▶ {iou_after:.2f}% ({iou_delta:+.2f}%p)  |  "
+        f"Pixel Error: {error_b} px ──▶ {error_a} px ({error_delta:+} px Saved)  |  Improvement: {(iou_delta/iou_before*100) if iou_before>0 else 0:+.1f}%"
     )
 
+    # 살짝 위(0.62)로 올려서 하단 제목과의 충돌 방지
     ax_mid.text(
-        0.5, 0.5, summary_text,
+        0.5, 0.62, summary_text,
         fontsize=10.5, family='monospace', fontweight='bold', color='#0f172a',
         ha='center', va='center',
         bbox=dict(
             boxstyle='round,pad=0.8',
             facecolor='#f8fafc',
-            edgecolor='#3b82f6',
+            edgecolor='#2563eb',
             linewidth=1.8,
             alpha=0.98
         )
@@ -528,17 +527,18 @@ def generate_comprehensive_plot():
 
     # ------------------ ROW 2: AFTER OPC ------------------
     ax_bot = [fig.add_subplot(gs[2, c]) for c in range(4)]
-    fig.text(0.06, 0.485, "SECTION 2: AFTER OPC (Safe-Core Balanced ILT & Serif Optimization)",
-             fontsize=13.5, fontweight='heavy', color='#1b5e20', ha='left')
+    # 하단 섹션 제목을 살짝 내려서 중앙 배너와 절대 겹치지 않게 배치
+    fig.text(0.06, 0.465, "SECTION 2: AFTER OPC (Safe-Core Extended Mask & Serif Optimization)",
+             fontsize=14, fontweight='heavy', color='#1b5e20', ha='left')
 
     ax_bot[0].imshow(target, cmap='Blues', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
-    ax_bot[0].set_title("(A) Target Reference\n(Golden Target Layout)", fontsize=11, fontweight='bold', pad=10)
+    ax_bot[0].set_title("(A) Target Reference\n(Golden Target Layout)", fontsize=11, fontweight='bold', pad=12)
 
     ax_bot[1].imshow(st.session_state.current_mask, cmap='Purples', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
-    ax_bot[1].set_title("(B-2) After Mask (With OPC)\n(Optimized Serifs & Jogs)", fontsize=11, fontweight='bold', pad=10)
+    ax_bot[1].set_title("(B-2) After Mask (With OPC)\n(Extended Outer Serifs)", fontsize=11, fontweight='bold', pad=12)
 
     im_c1 = ax_bot[2].imshow(norm_exp_after, cmap='inferno', origin='upper', extent=extent_nm, interpolation='bilinear', vmin=0.0, vmax=1.0)
-    ax_bot[2].set_title("(C-2) Aerial Image (After)\n(Corrected Intensity Profile)", fontsize=11, fontweight='bold', pad=10)
+    ax_bot[2].set_title("(C-2) Aerial Image (After)\n(Corrected Intensity Profile)", fontsize=11, fontweight='bold', pad=12)
     overlay_target_outline(ax_bot[2])
     cbar1 = fig.colorbar(im_c1, ax=ax_bot[2], fraction=0.046, pad=0.04)
     cbar1.ax.tick_params(labelsize=9)
@@ -548,7 +548,7 @@ def generate_comprehensive_plot():
     diff_after[(target == 1) & (printed_after == 0)] = [0.95, 0.1, 0.1]
     diff_after[(target == 0) & (printed_after == 1)] = [0.1, 0.4, 0.95]
     ax_bot[3].imshow(diff_after, origin='upper', extent=extent_nm, interpolation='nearest')
-    ax_bot[3].set_title(f"(D-2) Superposition (After)\nIoU: {iou_after:.2f}% ({error_a}px error)", fontsize=11, fontweight='bold', pad=10)
+    ax_bot[3].set_title(f"(D-2) Superposition (After)\nIoU: {iou_after:.2f}% ({error_a}px error)", fontsize=11, fontweight='bold', pad=12)
     overlay_target_outline(ax_bot[3])
 
     # 축 설정 공통화
@@ -570,7 +570,7 @@ st.subheader("Lithography & OPC Comprehensive Verification")
 fig_result = generate_comprehensive_plot()
 st.pyplot(fig_result)
 
-# 11. 양방향 균형(Balanced IoU) 최적화 OPC 엔진 (수율 상승 보장)
+# 11. 확장 마스크 기반 강력한 수율 보장 하이브리드 OPC 엔진
 def run_iterative_opc(target_pattern, opt_kernel, opt_th, iterations=7):
     h, w = target_pattern.shape
     base = target_pattern.copy()
@@ -579,23 +579,23 @@ def run_iterative_opc(target_pattern, opt_kernel, opt_th, iterations=7):
     core_skeleton = binary_erosion(base, structure=np.ones((2, 2))).astype(float)
     mask = base.copy()
 
-    # 2. 볼록 모서리(Outer Corner) 세리프 및 선 끝 연장 초기 배치
+    # 2. 확장된 여백 영역으로 외곽 뿔(Outer Serif) 및 선 끝단 해머헤드 과감하게 돌출
     pad = np.pad(base, 1, mode='constant', constant_values=0)
     for r in range(h):
         for c in range(w):
             center = pad[r+1, c+1]
             if center == 0:
-                # 볼록 외곽 코너: 1픽셀 세리프 돌기 부착
                 neighbors_diag = [
                     (pad[r, c+1], pad[r+1, c]),
                     (pad[r, c+1], pad[r+1, c+2]),
                     (pad[r+2, c+1], pad[r+1, c]),
                     (pad[r+2, c+1], pad[r+1, c+2])
                 ]
+                # 외곽 볼록 모서리 주변에 세리프 부착
                 if any(v1 == 1 and v2 == 1 for v1, v2 in neighbors_diag):
                     mask[r, c] = 1.0
             elif center == 1:
-                # 선 끝단 1픽셀 연장
+                # 선 끝단 밖으로 연장 (상하 여백으로 뻗어나감)
                 up, down = pad[r, c+1], pad[r+2, c+1]
                 if (up == 0 and down == 1) or (up == 1 and down == 0):
                     if r > 0 and pad[r, c+1] == 0:
@@ -603,7 +603,7 @@ def run_iterative_opc(target_pattern, opt_kernel, opt_th, iterations=7):
                     if r < h - 1 and pad[r+2, c+1] == 0:
                         mask[r+1, c] = 1.0
 
-    # 3. 양방향 균형 반복 루프 (과도 번짐 방지 페널티 적용)
+    # 3. 오차 기반 역피드백 루프 (확장 영역에서 안정적으로 수렴)
     diff_kernel = np.array([
         [0.2, 0.5, 0.2],
         [0.5, 1.0, 0.5],
@@ -613,23 +613,21 @@ def run_iterative_opc(target_pattern, opt_kernel, opt_th, iterations=7):
 
     cont_mask = mask.copy()
     for _ in range(iterations):
-        bin_m = (cont_mask >= 0.48).astype(float)
+        bin_m = (cont_mask >= 0.45).astype(float)
         exp = convolve(bin_m, opt_kernel, mode='constant', cval=0.0)
         max_e = np.max(exp) if np.max(exp) > 0 else 1.0
         printed = ((exp / max_e) >= opt_th).astype(float)
 
-        # 오차: 결손(빨강, +1), 과도 번짐(파랑, -1)
         error = base - printed
-        
-        # 번짐(파랑)에 더 민감하게 반응하여 마스크가 바깥으로 비대해지는 것 차단
-        error_weighted = np.where(error < 0, error * 1.3, error * 0.8)
+        # 결손(빨강, +)을 우선 보강하고 과도 번짐(파랑, -)은 억제
+        error_weighted = np.where(error > 0, error * 1.1, error * 0.9)
 
         grad = convolve(error_weighted, diff_kernel, mode='constant', cval=0.0)
         cont_mask += 0.5 * grad
         cont_mask = np.clip(cont_mask, 0.0, 1.0)
         cont_mask = np.maximum(cont_mask, core_skeleton)
 
-    return (cont_mask >= 0.48).astype(float)
+    return (cont_mask >= 0.45).astype(float)
 
 # 12. 마스크 제어 및 내보내기 영역
 st.subheader("OPC Modification & Export")
@@ -660,7 +658,7 @@ with ctrl_cols[2]:
 if layout_mode == "Interactive Grid Drawing":
     with ctrl_cols[3]:
         drawn_csv_buf = io.StringIO()
-        np.savetxt(drawn_csv_buf, target.astype(int), delimiter=",", fmt="%d")
+        np.savetxt(drawn_csv_buf, raw_target.astype(int), delimiter=",", fmt="%d")
         st.download_button(
             label="📥 그린 타겟 다운로드 (CSV)",
             data=drawn_csv_buf.getvalue(),

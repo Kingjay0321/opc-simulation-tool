@@ -124,16 +124,20 @@ with c1:
 with c2:
     if st.button("자동 간단 OPC 적용 (Serif & Line Extension)"):
         corrected = target.copy()
-        # 모서리 Serif 및 선 끝 확장 픽셀 추가 예시
         from scipy.ndimage import binary_dilation
         corrected = binary_dilation(target, iterations=1).astype(float)
         st.session_state.current_mask = corrected
         st.rerun()
 
 with c3:
+    import io
+    csv_buffer = io.StringIO()
+    np.savetxt(csv_buffer, st.session_state.current_mask, delimiter=",", fmt="%.1f")
+    csv_data = csv_buffer.getvalue()
+    
     st.download_button(
         label="현재 마스크 배열 다운로드 (CSV)",
-        data=np.savetxt("mask.csv", st.session_state.current_mask, delimiter=","),
+        data=csv_data,
         file_name=f"{layout_choice}_mask.csv",
         mime="text/csv"
     )

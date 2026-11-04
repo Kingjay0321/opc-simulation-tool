@@ -3,7 +3,7 @@ import streamlit.components.v1 as components
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
-from scipy.ndimage import convolve
+from scipy.ndimage import convolve, binary_dilation
 import json
 import io
 import os
@@ -22,11 +22,11 @@ layout_mode = st.sidebar.radio("Layout Input Mode", ["Preset Standard Cells", "I
 # 2. 프리셋 레이아웃 정의
 def get_inv_x1():
     mask = np.zeros((54, 18), dtype=float)
-    mask[0:3, 0:18] = 1.0     # 상단 바 (y: 0~10.5 nm)
-    mask[51:54, 0:18] = 1.0   # 하단 바 (y: 178.5~189 nm)
-    mask[3:21, 3:6] = 1.0    # 좌상단 세로선
-    mask[33:51, 3:6] = 1.0   # 좌하단 세로선
-    mask[18:36, 12:15] = 1.0 # 우측 중앙 세로선
+    mask[0:3, 0:18] = 1.0
+    mask[51:54, 0:18] = 1.0
+    mask[3:21, 3:6] = 1.0
+    mask[33:51, 3:6] = 1.0
+    mask[18:36, 12:15] = 1.0
     return mask
 
 def get_nand2_x4():
@@ -469,16 +469,65 @@ st.subheader("Lithography & OPC Analysis Result")
 fig_result = generate_analysis_plot()
 st.pyplot(fig_result)
 
-# 9. 자동 최적화 반복 OPC 함수 (역문제 피드백 루프)
-def run_iterative_opc(target_pattern, opt_kernel, opt_th, iterations=7, step_size=0.45):
-    mask = target_pattern.copy()
-    for _ in range(iterations):
-        exp = convolve(mask, opt_kernel, mode='constant', cval=0.0)
+# 9. 실전 역노광(ILT) + 모서리 세리프 하이브리드 최적화 엔진
+def run_iterative_opc(target_pattern, opt_kernel, opt_th, iterations=8):
+    h, w = target_pattern.shape
+    # 연속 마스크 변수 (0.0 ~ 1.0)
+    cont_mask = target_pattern.copy()
+
+    # 1단계: 선 끝단(Line-End) 및 볼록 코너(Outer Corner) 기하학적 초기 세리프 부착
+    pad = np.pad(target_pattern, 1, mode='constant', constant_values=0)
+    for r in range(h):
+        for c in range(w):
+            center = pad[r+1, c+1]
+            if center == 0:
+                # 상하좌우 및 대각 성분 검사로 볼록 코너에 뿔(Serif) 배치
+                up = pad[r, c+1]
+                down = pad[r+2, c+1]
+                left = pad[r+1, c]
+                right = pad[r+1, c+2]
+                if (up == 1 and left == 1) or (up == 1 and right == 1) or \
+                   (down == 1 and left == 1) or (down == 1 and right == 1):
+                    cont_mask[r, c] += 0.6
+            elif center == 1:
+                # 선 끝단(Line-End)에 해머헤드(Hammerhead) 확장 유도
+                up = pad[r, c+1]
+                down = pad[r+2, c+1]
+                if (up == 0 and down == 1) or (up == 1 and down == 0):
+                    if c > 0:
+                        cont_mask[r, c-1] += 0.5
+                    if c < w - 1:
+                        cont_mask[r, c+1] += 0.5
+
+    # 2단계: 역노광(Inverse Lithography) 그래디언트 디센트 피드백 루프
+    # 에러 E = Target - Printed 를 광학 커널 K 로 역확산(Adjoint Convolve)시켜 마스크 외곽으로 살을 찌움
+    diff_kernel = np.array([
+        [0.2, 0.5, 0.2],
+        [0.5, 1.0, 0.5],
+        [0.2, 0.5, 0.2]
+    ])
+    diff_kernel = diff_kernel / np.sum(diff_kernel)
+
+    for it in range(iterations):
+        # 현재 마스크 상태로 노광 시뮬레이션
+        bin_mask = (cont_mask >= 0.40).astype(float)
+        exp = convolve(bin_mask, opt_kernel, mode='constant', cval=0.0)
         max_e = np.max(exp) if np.max(exp) > 0 else 1.0
-        sim_printed = ((exp / max_e) >= opt_th).astype(float)
-        error = target_pattern - sim_printed
-        mask = np.clip(mask + step_size * error, 0.0, 1.0)
-    return (mask >= 0.5).astype(float)
+        printed_curr = ((exp / max_e) >= opt_th).astype(float)
+
+        # 오차 계산: (빨간색 = +1, 파란색 = -1)
+        error = target_pattern - printed_curr
+
+        # 핵심: 오차 신호를 인접 픽셀로 확산시켜 마스크 경계 바깥/안쪽으로 그래디언트 전달!
+        gradient = convolve(error, diff_kernel, mode='constant', cval=0.0)
+
+        # 마스크 업데이트 (빨간 결손부는 밖으로 커지고, 파란 번짐부는 안쪽으로 깎임)
+        cont_mask += 0.7 * gradient
+        cont_mask = np.clip(cont_mask, 0.0, 1.2)
+
+    # 3단계: 뚜렷한 외곽 형상을 갖춘 이진 마스크 생성
+    final_opc_mask = (cont_mask >= 0.40).astype(float)
+    return final_opc_mask
 
 # 10. 마스크 제어 및 내보내기 파트
 st.subheader("OPC Modification & Export")
@@ -490,9 +539,9 @@ with ctrl_cols[0]:
         st.rerun()
 
 with ctrl_cols[1]:
-    if st.button("⚡ 반복 최적화 자동 OPC 실행 (Iterative Loop)", type="primary"):
+    if st.button("⚡ 역노광 최적화 자동 OPC 실행 (ILT Loop)", type="primary"):
         with st.spinner("OPC 역보정 최적화 연산 중..."):
-            optimized_mask = run_iterative_opc(target, kernel, threshold, iterations=7, step_size=0.45)
+            optimized_mask = run_iterative_opc(target, kernel, threshold, iterations=8)
             st.session_state.current_mask = optimized_mask
             st.rerun()
 

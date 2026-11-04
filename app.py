@@ -13,7 +13,7 @@ st.title("Optical Proximity Correction (OPC) Tool")
 st.markdown("**7nm FinFET Standard Cell Metal1 Layout Simulation & Correction Platform**")
 st.caption("Standard Unit: 1 Grid = 3.5 nm × 3.5 nm (λ = 3.5 nm, Metal1 Wire Width = 3 Grid = 10.5 nm)")
 
-unit_scale = 3.5  # nm per pixel
+unit_scale = 3.5  # nm/pixel
 
 # 1. 사이드바 설정
 st.sidebar.header("Simulation Settings")
@@ -46,7 +46,7 @@ def get_nand2_x4():
     mask[30:48, 30:33] = 1.0
     return mask
 
-# 양방향 통신 전용 커스텀 컴포넌트 빌더 함수
+# 양방향 통신 전용 커스텀 컴포넌트 빌더
 def build_pixel_grid_component():
     current_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else os.getcwd()
     comp_dir = os.path.join(current_dir, "pixel_grid_component")
@@ -74,7 +74,7 @@ def build_pixel_grid_component():
       flex-wrap: wrap;
     }
     .btn {
-      padding: 6px 12px;
+      padding: 6px 11px;
       border: 2px outset #ffffff;
       background: #d4d0c8;
       font-weight: bold;
@@ -127,14 +127,14 @@ def build_pixel_grid_component():
     <button id="eraseBtn" class="btn" onclick="setMode(0)">🧹 지우개 (0)</button>
     <button id="toggleBtn" class="btn" onclick="setMode(2)">🔄 토글 모드</button>
     <button class="btn" onclick="clearGrid()">🗑️ 전체 리셋</button>
-    <button class="btn action" onclick="sendDataToStreamlit()">⚡ 즉시 적용</button>
+    <button class="btn action" onclick="triggerApply()">⚡ 시뮬레이션 적용</button>
     <span id="dim-label" style="font-size:11px; color:#555;"></span>
   </div>
   <div id="grid-container"></div>
 
   <script>
     let isDrawing = false;
-    let drawMode = 1; // 1: Draw, 0: Erase, 2: Toggle
+    let drawMode = 1;
     let toggleTargetVal = 1;
     let rows = 20;
     let cols = 20;
@@ -200,7 +200,8 @@ def build_pixel_grid_component():
     window.addEventListener('mouseup', () => {
       if (isDrawing) {
         isDrawing = false;
-        sendDataToStreamlit();
+        // 마우스를 뗄 때는 프리뷰 갱신용으로 데이터만 가볍게 전달
+        sendMsg("streamlit:setComponentValue", { value: { matrix: gridData, apply: false } });
       }
     });
 
@@ -218,11 +219,12 @@ def build_pixel_grid_component():
         }
       }
       document.querySelectorAll('.cell').forEach(el => el.classList.remove('filled'));
-      sendDataToStreamlit();
+      sendMsg("streamlit:setComponentValue", { value: { matrix: gridData, apply: false } });
     }
 
-    function sendDataToStreamlit() {
-      sendMsg("streamlit:setComponentValue", { value: gridData });
+    function triggerApply() {
+      // 버튼 누를 때는 시뮬레이션 연산 트리거 플래그 전달
+      sendMsg("streamlit:setComponentValue", { value: { matrix: gridData, apply: true } });
     }
 
     window.addEventListener("message", (event) => {
@@ -254,45 +256,66 @@ if layout_mode == "Preset Standard Cells":
     preset_choice = st.sidebar.selectbox("Select Target Cell", ["INV_X1", "NAND2_X4"])
     target = get_inv_x1() if preset_choice == "INV_X1" else get_nand2_x4()
     layout_name = preset_choice
+    active_target = target.copy()
 
 elif layout_mode == "Interactive Grid Drawing":
     st.sidebar.subheader("Canvas Grid Size")
     grid_w = st.sidebar.number_input("Grid Width (X, columns)", min_value=5, max_value=40, value=20, step=1)
-    grid_h = st.sidebar.number_input("Grid Height (Y, rows)", min_value=5, max_value=40, value=20, step=1)
+    grid_h = st.sidebar.number_input("Grid Height (Y, rows)", min_value=5, max_value=60, value=20, step=1)
+    
+    # 2번 요구사항: 최대 격자 크기 명시
+    st.sidebar.caption("📏 **최대 허용 크기:** Max X: 40 cols, Max Y: 60 rows (단위: 1 grid = 3.5 nm)")
 
     st.subheader("Minesweeper-Style Pixel Grid Editor")
-    st.markdown("💡 **그리기(1) / 지우개(0) / 토글 모드를 선택하고 격자판을 쓱 드래그하세요. 마우스를 놓으면 즉시 반영됩니다.**")
+    st.markdown("💡 **마우스로 쓱 드래그하면 오른쪽 프리뷰가 실시간으로 바뀝니다. 시뮬레이션 계산은 [적용] 버튼을 누를 때 실행됩니다.**")
 
     matrix_key = f"matrix_{grid_w}_{grid_h}"
+    sim_target_key = f"sim_target_{grid_w}_{grid_h}"
+
     if matrix_key not in st.session_state:
         st.session_state[matrix_key] = [[0 for _ in range(grid_w)] for _ in range(grid_h)]
 
     if len(st.session_state[matrix_key]) != grid_h or len(st.session_state[matrix_key][0]) != grid_w:
         st.session_state[matrix_key] = [[0 for _ in range(grid_w)] for _ in range(grid_h)]
 
+    if sim_target_key not in st.session_state:
+        st.session_state[sim_target_key] = np.array(st.session_state[matrix_key], dtype=float)
+
     col_canvas, col_preview = st.columns([1.2, 1])
 
     with col_canvas:
-        # 공식 양방향 컴포넌트로 데이터 직접 수신
-        component_output = pixel_grid_component(
+        # 양방향 통신 컴포넌트 호출
+        comp_res = pixel_grid_component(
             rows=int(grid_h),
             cols=int(grid_w),
             initial_matrix=st.session_state[matrix_key],
-            key=f"grid_editor_{grid_w}_{grid_h}"
+            key=f"grid_comp_{grid_w}_{grid_h}"
         )
 
-        if component_output is not None:
-            st.session_state[matrix_key] = component_output
+        should_apply = False
+        if comp_res is not None and isinstance(comp_res, dict):
+            st.session_state[matrix_key] = comp_res.get("matrix", st.session_state[matrix_key])
+            should_apply = comp_res.get("apply", False)
 
-    target = np.array(st.session_state[matrix_key], dtype=float)
+        c_btn1, c_btn2 = st.columns([1.5, 1])
+        with c_btn1:
+            if st.button("⚡ 그린 패턴 시뮬레이션에 적용하기 (Apply)", type="primary") or should_apply:
+                st.session_state[sim_target_key] = np.array(st.session_state[matrix_key], dtype=float)
+                st.session_state.current_mask = st.session_state[sim_target_key].copy()
+                st.rerun()
+
+    # 실시간 드로잉 프리뷰용 타겟
+    live_target = np.array(st.session_state[matrix_key], dtype=float)
+    # 실제 연산에 쓰이는 타겟
+    active_target = st.session_state[sim_target_key]
     layout_name = f"Custom_{grid_w}x{grid_h}"
 
     with col_preview:
         st.markdown("**실시간 패턴 프리뷰 (A)**")
         fig_prev, ax_prev = plt.subplots(figsize=(4.5, 4.5 * (grid_h / grid_w)))
-        ax_prev.imshow(target, cmap='Blues', origin='upper', interpolation='nearest',
+        ax_prev.imshow(live_target, cmap='Blues', origin='upper', interpolation='nearest',
                        extent=[0, grid_w * unit_scale, grid_h * unit_scale, 0])
-        ax_prev.set_title("Current Target Pattern (A)", fontsize=11, fontweight='bold')
+        ax_prev.set_title("Current Drawn Target (Realtime)", fontsize=11, fontweight='bold')
         ax_prev.set_xlabel("X (nm)", fontsize=9)
         ax_prev.set_ylabel("Y (nm)", fontsize=9)
         ax_prev.xaxis.set_minor_locator(MultipleLocator(unit_scale))
@@ -309,22 +332,15 @@ else:
         target = np.zeros((30, 30), dtype=float)
         target[10:20, 10:20] = 1.0
     layout_name = "Uploaded_CSV"
+    active_target = target.copy()
 
-# 4. 세션 상태 관리 (마스크 및 타겟 실시간 동기화)
-target_hash = hash(target.tobytes())
+# 4. 세션 상태 관리 (마스크 동기화)
 if "current_mask" not in st.session_state or st.session_state.get("last_layout") != layout_name:
-    st.session_state.current_mask = target.copy()
+    st.session_state.current_mask = active_target.copy()
     st.session_state.last_layout = layout_name
-    st.session_state.last_target_hash = target_hash
 
-if st.session_state.current_mask.shape != target.shape:
-    st.session_state.current_mask = target.copy()
-    st.session_state.last_target_hash = target_hash
-
-# 새로 그렸을 때 시뮬레이션 마스크도 새 타겟과 즉시 동기화
-if st.session_state.get("last_target_hash") != target_hash:
-    st.session_state.current_mask = target.copy()
-    st.session_state.last_target_hash = target_hash
+if st.session_state.current_mask.shape != active_target.shape:
+    st.session_state.current_mask = active_target.copy()
 
 # 5. 광학 파라미터 제어
 st.sidebar.subheader("Optical Lithography Parameters")
@@ -350,30 +366,30 @@ else:
     kernel = np.exp(-(xx**2 + yy**2) / (2.0 * sigma**2))
     kernel = kernel / np.sum(kernel)
 
-# 광학 노광 및 현상 연산
+# 광학 노광 및 현상 연산 (적용된 active_target 기준)
 exposure = convolve(st.session_state.current_mask, kernel, mode='constant', cval=0.0)
 max_val = np.max(exposure) if np.max(exposure) > 0 else 1.0
 norm_exposure = exposure / max_val
 printed = (norm_exposure >= threshold).astype(float)
 
 # 정량적 분석 지표 (IoU & 오차)
-intersection = np.logical_and(target == 1, printed == 1).sum()
-union = np.logical_or(target == 1, printed == 1).sum()
+intersection = np.logical_and(active_target == 1, printed == 1).sum()
+union = np.logical_or(active_target == 1, printed == 1).sum()
 iou = (intersection / union) * 100 if union > 0 else 0.0
 error_pixels = int(union - intersection)
 
-h_px, w_px = target.shape
+h_px, w_px = active_target.shape
 extent_nm = [0, w_px * unit_scale, h_px * unit_scale, 0]
 aspect_ratio = h_px / w_px
 
 # 메트릭 표시
-st.subheader("Quantitative Evaluation")
+st.subheader("Quantitative Evaluation (Applied Pattern)")
 c_m1, c_m2, c_m3 = st.columns(3)
 c_m1.metric("Grid Dimension", f"{w_px} × {h_px} px")
 c_m2.metric("Physical Size", f"{w_px * unit_scale:.1f} × {h_px * unit_scale:.1f} nm")
 c_m3.metric("Pattern Fidelity (IoU)", f"{iou:.2f}%", delta=f"{error_pixels} px Error", delta_color="inverse")
 
-# 6. 하단 4개 플롯 최적 동적 배치 (세로형이면 1x4, 정사각이면 2x2)
+# 6. 하단 4개 플롯 최적 동적 배치 (길쭉하면 1x4, 정사각이면 2x2)
 def generate_analysis_plot():
     is_tall = aspect_ratio >= 1.4
     if is_tall:
@@ -383,8 +399,8 @@ def generate_analysis_plot():
         axes_flat = axes.flatten()
 
     # (A) Target Pattern
-    axes_flat[0].imshow(target, cmap='Blues', origin='upper', extent=extent_nm, interpolation='nearest')
-    axes_flat[0].set_title("(A) Target Pattern", fontsize=12, fontweight='bold')
+    axes_flat[0].imshow(active_target, cmap='Blues', origin='upper', extent=extent_nm, interpolation='nearest')
+    axes_flat[0].set_title("(A) Applied Target Pattern", fontsize=12, fontweight='bold')
 
     # (B) Current Mask
     axes_flat[1].imshow(st.session_state.current_mask, cmap='bone_r', origin='upper', extent=extent_nm, interpolation='nearest')
@@ -396,10 +412,10 @@ def generate_analysis_plot():
     plt.colorbar(im_c, ax=axes_flat[2], fraction=0.046, pad=0.04)
 
     # (D) Superposition Analysis
-    diff_view = np.zeros((*target.shape, 3))
-    diff_view[(target == 1) & (printed == 1)] = [0.1, 0.85, 0.1]  # Green: 일치
-    diff_view[(target == 1) & (printed == 0)] = [0.95, 0.1, 0.1]  # Red: 결손
-    diff_view[(target == 0) & (printed == 1)] = [0.1, 0.4, 0.95]  # Blue: 번짐
+    diff_view = np.zeros((*active_target.shape, 3))
+    diff_view[(active_target == 1) & (printed == 1)] = [0.1, 0.85, 0.1]  # Green: 일치
+    diff_view[(active_target == 1) & (printed == 0)] = [0.95, 0.1, 0.1]  # Red: 결손
+    diff_view[(active_target == 0) & (printed == 1)] = [0.1, 0.4, 0.95]  # Blue: 번짐
 
     axes_flat[3].imshow(diff_view, origin='upper', extent=extent_nm, interpolation='nearest')
     axes_flat[3].set_title("(D) Superposition (G: Match, R: Under, B: Over)", fontsize=11, fontweight='bold')
@@ -427,14 +443,14 @@ ctrl_cols = st.columns(5 if layout_mode == "Interactive Grid Drawing" else 4)
 
 with ctrl_cols[0]:
     if st.button("Reset Mask to Target"):
-        st.session_state.current_mask = target.copy()
+        st.session_state.current_mask = active_target.copy()
         st.rerun()
 
 with ctrl_cols[1]:
     if st.button("Apply Quick Bias/OPC"):
         from scipy.ndimage import binary_dilation
-        dilated = binary_dilation(target, iterations=1)
-        st.session_state.current_mask = np.where(target == 1, target, (dilated.astype(float) * 0.5))
+        dilated = binary_dilation(active_target, iterations=1)
+        st.session_state.current_mask = np.where(active_target == 1, active_target, (dilated.astype(float) * 0.5))
         st.rerun()
 
 with ctrl_cols[2]:
@@ -450,7 +466,7 @@ with ctrl_cols[2]:
 if layout_mode == "Interactive Grid Drawing":
     with ctrl_cols[3]:
         drawn_csv_buf = io.StringIO()
-        np.savetxt(drawn_csv_buf, target.astype(int), delimiter=",", fmt="%d")
+        np.savetxt(drawn_csv_buf, active_target.astype(int), delimiter=",", fmt="%d")
         st.download_button(
             label="Download Drawn Target (CSV)",
             data=drawn_csv_buf.getvalue(),

@@ -26,7 +26,7 @@ def get_inv_x1():
     mask[51:54, 0:18] = 1.0   # 하단 바 (y: 178.5~189 nm)
     mask[3:21, 3:6] = 1.0    # 좌상단 세로선
     mask[33:51, 3:6] = 1.0   # 좌하단 세로선
-    mask[18:36, 12:15] = 1.0 # 우측 세로선 (y: 63~126 nm, x: 42~52.5 nm)
+    mask[18:36, 12:15] = 1.0 # 우측 중앙 세로선
     return mask
 
 def get_nand2_x4():
@@ -46,7 +46,7 @@ def get_nand2_x4():
     mask[30:48, 30:33] = 1.0
     return mask
 
-# 양방향 통신 컴포넌트 생성 (상태 꼬임 방지 처리 완료)
+# 양방향 통신 컴포넌트 생성 함수
 def build_editor_component():
     current_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else os.getcwd()
     comp_dir = os.path.join(current_dir, "pixel_grid_component")
@@ -138,11 +138,12 @@ def build_editor_component():
 
   <script>
     let isDrawing = false;
-    let drawMode = 1;
+    let drawMode = 1; // 1: Draw, 0: Erase, 2: Toggle
     let currentToggleTarget = 1;
     let rows = 20;
     let cols = 20;
     let grid = [];
+    let initialized = false;
 
     const container = document.getElementById('grid-box');
 
@@ -154,7 +155,7 @@ def build_editor_component():
       }, "*");
     }
 
-    function initGrid() {
+    function renderGridUI() {
       container.innerHTML = '';
       container.style.gridTemplateColumns = `repeat(${cols}, 16px)`;
       container.style.gridTemplateRows = `repeat(${rows}, 16px)`;
@@ -219,11 +220,12 @@ def build_editor_component():
         }
       }
       document.querySelectorAll('.cell').forEach(el => el.classList.remove('filled'));
-      // 초기화 상태를 즉각 파이썬 세션에도 전달
+      // 초기화 상태를 파이썬으로 확정 전송
       sendMsg("streamlit:setComponentValue", { value: { action: "clear", matrix: grid } });
     }
 
     function submitToSimulation() {
+      // 현재 브라우저 메모리에 있는 최종 grid 배열을 단방향 전송
       sendMsg("streamlit:setComponentValue", { value: { action: "apply", matrix: grid } });
     }
 
@@ -233,8 +235,12 @@ def build_editor_component():
         if (args) {
           rows = args.rows;
           cols = args.cols;
-          grid = args.initial_matrix;
-          initGrid();
+          // 최초 1회 또는 강제 리셋 시에만 초기 행렬 수신
+          if (!initialized || args.force_reset) {
+            grid = JSON.parse(JSON.stringify(args.initial_matrix));
+            initialized = true;
+          }
+          renderGridUI();
         }
       }
     });
@@ -251,7 +257,7 @@ def build_editor_component():
 
 pixel_grid_component = build_editor_component()
 
-# 3. 레이아웃 모드별 타겟 로직
+# 3. 레이아웃 모드별 타겟 처리
 if layout_mode == "Preset Standard Cells":
     preset_choice = st.sidebar.selectbox("Select Target Cell", ["INV_X1", "NAND2_X4"])
     target = get_inv_x1() if preset_choice == "INV_X1" else get_nand2_x4()
@@ -264,28 +270,43 @@ elif layout_mode == "Interactive Grid Drawing":
     st.sidebar.caption("📏 **최대 허용 크기:** Max X: 40 cols, Max Y: 60 rows (단위: 1 grid = 3.5 nm)")
 
     st.subheader("Minesweeper-Style Pixel Grid Editor")
-    st.markdown("💡 **격자판에서 마우스로 드래그하여 배선을 그리고, 상단 [⚡ 시뮬레이션 연산 실행]을 누르면 연산이 시작됩니다.**")
+    st.markdown("💡 **격자판에서 마우스로 드래그하여 배선을 그리고, [⚡ 시뮬레이션 연산 실행]을 누르면 연산이 시작됩니다.**")
 
-    matrix_key = f"active_drawn_{grid_w}_{grid_h}"
+    # 버전 관리 및 세션 상태 키
+    if "editor_version" not in st.session_state:
+        st.session_state.editor_version = 0
+
+    matrix_key = f"drawn_data_{grid_w}_{grid_h}"
     if matrix_key not in st.session_state:
         st.session_state[matrix_key] = [[0 for _ in range(grid_w)] for _ in range(grid_h)]
 
     if len(st.session_state[matrix_key]) != grid_h or len(st.session_state[matrix_key][0]) != grid_w:
         st.session_state[matrix_key] = [[0 for _ in range(grid_w)] for _ in range(grid_h)]
 
+    # Streamlit Component 호출 (고유 키에 버전을 주입하여 이전 캐시 간섭 방지)
     comp_result = pixel_grid_component(
         rows=int(grid_h),
         cols=int(grid_w),
         initial_matrix=st.session_state[matrix_key],
-        key=f"editor_comp_{grid_w}_{grid_h}"
+        force_reset=(st.session_state.get("need_force_reset", False)),
+        key=f"editor_v{st.session_state.editor_version}_{grid_w}_{grid_h}"
     )
+
+    st.session_state.need_force_reset = False
 
     if comp_result is not None and isinstance(comp_result, dict):
         action = comp_result.get("action")
         mat = comp_result.get("matrix")
         if mat is not None:
             st.session_state[matrix_key] = mat
-            if action == "apply":
+            if action == "clear":
+                # 리셋 시 버전 번호를 올려서 새 컴포넌트로 강제 초기화
+                st.session_state.editor_version += 1
+                st.session_state.need_force_reset = True
+                st.session_state.current_mask = np.zeros((grid_h, grid_w), dtype=float)
+                st.rerun()
+            elif action == "apply":
+                # Apply 시 파이썬 타겟 및 마스크 배열을 최신으로 완전 갱신
                 st.session_state.current_mask = np.array(mat, dtype=float)
 
     target = np.array(st.session_state[matrix_key], dtype=float)
@@ -301,7 +322,7 @@ else:
         target[10:20, 10:20] = 1.0
     layout_name = "Uploaded_CSV"
 
-# 4. 세션 마스크 상태 동기화
+# 4. 세션 마스크 상태 관리
 if "current_mask" not in st.session_state or st.session_state.get("last_layout") != layout_name:
     st.session_state.current_mask = target.copy()
     st.session_state.last_layout = layout_name
@@ -361,7 +382,7 @@ c_m1.metric("Grid Dimension", f"{w_px} × {h_px} px")
 c_m2.metric("Physical Size", f"{width_nm:.1f} × {height_nm:.1f} nm")
 c_m3.metric("Pattern Fidelity (IoU)", f"{iou:.2f}%", delta=f"{error_pixels} px Error", delta_color="inverse")
 
-# 7. CAD 치수 화살표 렌더링 헬퍼 함수
+# 7. CAD 치수 화살표 렌더링 함수
 def draw_dimension_arrows(ax):
     if not show_dimension:
         return
@@ -369,44 +390,29 @@ def draw_dimension_arrows(ax):
     arrow_props = dict(arrowstyle='<->', color='#1a4b8c', lw=1.2)
 
     if layout_name == "INV_X1":
-        # 상단 전체 가로폭: 63 nm (18λ)
         ax.annotate('', xy=(0, -8), xytext=(63, -8), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(31.5, -10, '63 nm (18λ)', color='#1a4b8c', fontsize=9, fontweight='bold',
-                ha='center', va='bottom', clip_on=False)
+        ax.text(31.5, -10, '63 nm (18λ)', color='#1a4b8c', fontsize=9, fontweight='bold', ha='center', va='bottom', clip_on=False)
 
-        # 우측 전체 높이: 189 nm (54λ)
         ax.annotate('', xy=(68, 0), xytext=(68, 189), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(71, 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=9, fontweight='bold',
-                ha='left', va='center', rotation=-90, clip_on=False)
+        ax.text(71, 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=9, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
 
-        # 우측 중앙 세로선 길이: 63 nm*
         ax.annotate('', xy=(56, 63), xytext=(56, 126), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(58, 94.5, '63 nm*', color='#1a4b8c', fontsize=8, fontweight='bold',
-                ha='left', va='center', rotation=-90, clip_on=False)
+        ax.text(58, 94.5, '63 nm*', color='#1a4b8c', fontsize=8, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
 
-        # 세로선 간격: 21 nm*
         ax.annotate('', xy=(21, 136), xytext=(42, 136), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(31.5, 134, '21 nm*', color='#1a4b8c', fontsize=9, fontweight='bold',
-                ha='center', va='bottom', clip_on=False)
+        ax.text(31.5, 134, '21 nm*', color='#1a4b8c', fontsize=9, fontweight='bold', ha='center', va='bottom', clip_on=False)
 
     elif layout_name == "NAND2_X4":
-        # 상단 전체 가로폭: 157.5 nm (45λ)
         ax.annotate('', xy=(0, -8), xytext=(157.5, -8), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(78.75, -10, '157.5 nm (45λ)', color='#1a4b8c', fontsize=9, fontweight='bold',
-                ha='center', va='bottom', clip_on=False)
+        ax.text(78.75, -10, '157.5 nm (45λ)', color='#1a4b8c', fontsize=9, fontweight='bold', ha='center', va='bottom', clip_on=False)
 
-        # 우측 전체 높이: 189 nm (54λ)
         ax.annotate('', xy=(164, 0), xytext=(164, 189), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(167, 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=9, fontweight='bold',
-                ha='left', va='center', rotation=-90, clip_on=False)
+        ax.text(167, 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=9, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
 
-        # 하단 핀 간격: 31.5 nm*
         ax.annotate('', xy=(10.5, 172), xytext=(42, 172), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(26.25, 170, '31.5 nm*', color='#1a4b8c', fontsize=9, fontweight='bold',
-                ha='center', va='bottom', clip_on=False)
+        ax.text(26.25, 170, '31.5 nm*', color='#1a4b8c', fontsize=9, fontweight='bold', ha='center', va='bottom', clip_on=False)
 
     else:
-        # 사용자 정의(Custom): 전체 가로/세로 자동 표기
         offset_top = max(6.0, height_nm * 0.05)
         offset_right = max(6.0, width_nm * 0.05)
 
@@ -417,8 +423,8 @@ def draw_dimension_arrows(ax):
         ax.annotate('', xy=(width_nm + offset_right, 0), xytext=(width_nm + offset_right, height_nm), arrowprops=arrow_props, annotation_clip=False)
         ax.text(width_nm + offset_right + 2.0, height_nm / 2.0, f'{height_nm:.1f} nm ({h_px}λ)',
                 color='#1a4b8c', fontsize=9, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
-        
-# 8. 하단 4개 플롯 최적 동적 배치 (B, C 완전 가시화)
+
+# 8. 하단 4개 플롯 최적 동적 배치
 def generate_analysis_plot():
     is_tall = aspect_ratio >= 1.4
     if is_tall:
@@ -427,21 +433,21 @@ def generate_analysis_plot():
         fig, axes = plt.subplots(2, 2, figsize=(13, 13), constrained_layout=True)
         axes_flat = axes.flatten()
 
-    # (A) Target Pattern (CAD 치수 화살표 포함)
+    # (A) Target Pattern
     axes_flat[0].imshow(target, cmap='Blues', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
     axes_flat[0].set_title("(A) Target Pattern", fontsize=12, fontweight='bold')
     draw_dimension_arrows(axes_flat[0])
 
-    # (B) Current Mask (보라색 고대비 명확한 렌더링)
+    # (B) Current Mask
     axes_flat[1].imshow(st.session_state.current_mask, cmap='Purples', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
     axes_flat[1].set_title("(B) Current Mask (Input)", fontsize=12, fontweight='bold')
 
-    # (C) Aerial Image (광량 분포 히트맵: vmin, vmax 고정으로 절대 깨지지 않음)
+    # (C) Aerial Image
     im_c = axes_flat[2].imshow(norm_exposure, cmap='inferno', origin='upper', extent=extent_nm, interpolation='bilinear', vmin=0.0, vmax=1.0)
     axes_flat[2].set_title("(C) Aerial Image Intensity", fontsize=12, fontweight='bold')
     plt.colorbar(im_c, ax=axes_flat[2], fraction=0.046, pad=0.04)
 
-    # (D) Superposition Analysis (초록: 일치, 빨강: 결손, 파랑: 번짐)
+    # (D) Superposition Analysis
     diff_view = np.zeros((*target.shape, 3))
     diff_view[(target == 1) & (printed == 1)] = [0.1, 0.85, 0.1]
     diff_view[(target == 1) & (printed == 0)] = [0.95, 0.1, 0.1]
@@ -450,7 +456,6 @@ def generate_analysis_plot():
     axes_flat[3].imshow(diff_view, origin='upper', extent=extent_nm, interpolation='nearest')
     axes_flat[3].set_title("(D) Superposition (G: Match, R: Under, B: Over)", fontsize=11, fontweight='bold')
 
-    # 눈금 포맷팅
     major_x = 21.0 if width_nm > 40 else 10.5
     major_y = 31.5 if height_nm > 60 else 10.5
 
@@ -520,3 +525,4 @@ with ctrl_cols[btn_col_idx]:
         file_name=f"{layout_name}_analysis_plot.png",
         mime="image/png"
     )
+    

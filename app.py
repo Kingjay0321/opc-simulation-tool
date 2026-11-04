@@ -1,9 +1,10 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
 from scipy.ndimage import convolve
+import json
 import io
 
 st.set_page_config(page_title="OPC Simulation Tool", layout="wide")
@@ -17,7 +18,7 @@ unit_scale = 3.5  # nm/pixel
 st.sidebar.header("Simulation Settings")
 layout_mode = st.sidebar.radio("Layout Input Mode", ["Preset Standard Cells", "Interactive Grid Drawing", "CSV File Upload"])
 
-# 2. 타겟 레이아웃 생성
+# 2. 레이아웃 데이터 함수
 def get_inv_x1():
     mask = np.zeros((54, 18), dtype=float)
     mask[0:3, 0:18] = 1.0
@@ -44,8 +45,7 @@ def get_nand2_x4():
     mask[30:48, 30:33] = 1.0
     return mask
 
-custom_drawn_matrix = None
-
+# 3. 레이아웃 로드 분기
 if layout_mode == "Preset Standard Cells":
     preset_choice = st.sidebar.selectbox("Select Target Cell", ["INV_X1", "NAND2_X4"])
     target = get_inv_x1() if preset_choice == "INV_X1" else get_nand2_x4()
@@ -53,49 +53,197 @@ if layout_mode == "Preset Standard Cells":
 
 elif layout_mode == "Interactive Grid Drawing":
     st.sidebar.subheader("Canvas Grid Size")
-    grid_w = st.sidebar.number_input("Grid Width (X, columns)", min_value=5, max_value=40, value=15, step=1)
-    grid_h = st.sidebar.number_input("Grid Height (Y, rows)", min_value=5, max_value=40, value=20, step=1)
+    grid_w = st.sidebar.number_input("Grid Width (X, columns)", min_value=5, max_value=40, value=18, step=1)
+    grid_h = st.sidebar.number_input("Grid Height (Y, rows)", min_value=5, max_value=60, value=30, step=1)
 
-    # 세션 상태에 편집 그리드 보관
-    grid_key = f"grid_{grid_w}_{grid_h}"
-    if grid_key not in st.session_state:
-        st.session_state[grid_key] = pd.DataFrame(
-            False,
-            index=[f"Y{r}" for r in range(grid_h)],
-            columns=[f"X{c}" for c in range(grid_w)]
-        )
+    st.subheader("Minesweeper-Style Pixel Grid Editor")
+    st.markdown("💡 **마우스 왼쪽 버튼을 누른 채로 쓱 드래그하면 연속으로 빠르게 칠해집니다.**")
 
-    st.subheader("Interactive Pattern Editor")
-    col_editor, col_preview = st.columns([1.2, 1])
+    # 세션 상태에 사용자 드로잉 행렬 보관
+    canvas_session_key = f"drawn_matrix_{grid_w}_{grid_h}"
+    if canvas_session_key not in st.session_state:
+        st.session_state[canvas_session_key] = [[0 for _ in range(grid_w)] for _ in range(grid_h)]
 
-    with col_editor:
-        st.markdown("**지뢰찾기 스타일 격자판**: 클릭하여 패턴(True=배선)을 토글하세요.")
-        edited_df = st.data_editor(
-            st.session_state[grid_key],
-            use_container_width=True,
-            height=min(450, grid_h * 28 + 40),
-            key=f"editor_{grid_w}_{grid_h}"
-        )
-        c_rst1, c_rst2 = st.columns(2)
-        with c_rst1:
-            if st.button("격자판 전체 초기화"):
-                st.session_state[grid_key] = pd.DataFrame(
-                    False,
-                    index=[f"Y{r}" for r in range(grid_h)],
-                    columns=[f"X{c}" for c in range(grid_w)]
-                )
-                st.rerun()
+    initial_matrix_json = json.dumps(st.session_state[canvas_session_key])
 
-    target = edited_df.to_numpy().astype(float)
-    custom_drawn_matrix = target.copy()
+    # HTML5/JS 드래그 픽셀 그리드 컴포넌트
+    custom_canvas_html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        body {{
+          user-select: none;
+          font-family: monospace, sans-serif;
+          background: #f0f2f6;
+          margin: 0;
+          padding: 8px;
+        }}
+        .controls {{
+          margin-bottom: 10px;
+          display: flex;
+          gap: 10px;
+          align-items: center;
+        }}
+        .btn {{
+          padding: 6px 14px;
+          border: 2px outset #ffffff;
+          background: #d4d0c8;
+          font-weight: bold;
+          cursor: pointer;
+          border-radius: 3px;
+        }}
+        .btn:active {{
+          border-style: inset;
+        }}
+        .btn.active {{
+          background: #0044aa;
+          color: white;
+          border-style: inset;
+        }}
+        #grid-container {{
+          display: grid;
+          grid-template-columns: repeat({grid_w}, 16px);
+          grid-template-rows: repeat({grid_h}, 16px);
+          gap: 1px;
+          background-color: #808080;
+          padding: 4px;
+          border: 3px inset #c0c0c0;
+          width: fit-content;
+          max-height: 520px;
+          overflow: auto;
+        }}
+        .cell {{
+          width: 16px;
+          height: 16px;
+          background-color: #c0c0c0;
+          border-top: 1px solid #ffffff;
+          border-left: 1px solid #ffffff;
+          border-right: 1px solid #808080;
+          border-bottom: 1px solid #808080;
+          box-sizing: border-box;
+          cursor: crosshair;
+        }}
+        .cell.filled {{
+          background-color: #1a4b8c !important;
+          border: 1px solid #0d2b56 !important;
+        }}
+      </style>
+    </head>
+    <body>
+      <div class="controls">
+        <button id="drawBtn" class="btn active" onclick="setMode(1)">✏️ 배선 그리기 (1)</button>
+        <button id="eraseBtn" class="btn" onclick="setMode(0)">🧹 지우개 (0)</button>
+        <button class="btn" onclick="clearGrid()">🔄 전체 리셋</button>
+        <span style="font-size:12px; color:#555;">크기: {grid_w} × {grid_h} 칸</span>
+      </div>
+      <div id="grid-container"></div>
+      
+      <script>
+        let isDrawing = false;
+        let drawMode = 1; // 1: draw, 0: erase
+        const rows = {grid_h};
+        const cols = {grid_w};
+        let gridData = {initial_matrix_json};
+
+        const container = document.getElementById('grid-container');
+
+        function createGrid() {{
+          container.innerHTML = '';
+          for (let r = 0; r < rows; r++) {{
+            for (let c = 0; c < cols; c++) {{
+              const cell = document.createElement('div');
+              cell.classList.add('cell');
+              cell.dataset.r = r;
+              cell.dataset.c = c;
+              if (gridData[r] && gridData[r][c] === 1) {{
+                cell.classList.add('filled');
+              }}
+
+              cell.addEventListener('mousedown', (e) => {{
+                e.preventDefault();
+                isDrawing = true;
+                applyState(cell, r, c);
+              }});
+
+              cell.addEventListener('mouseenter', () => {{
+                if (isDrawing) {{
+                  applyState(cell, r, c);
+                }}
+              }});
+
+              container.appendChild(cell);
+            }}
+          }}
+        }}
+
+        function applyState(cell, r, c) {{
+          if (drawMode === 1) {{
+            cell.classList.add('filled');
+            gridData[r][c] = 1;
+          }} else {{
+            cell.classList.remove('filled');
+            gridData[r][c] = 0;
+          }}
+          sendDataToStreamlit();
+        }}
+
+        window.addEventListener('mouseup', () => {{
+          isDrawing = false;
+        }});
+
+        function setMode(mode) {{
+          drawMode = mode;
+          document.getElementById('drawBtn').classList.toggle('active', mode === 1);
+          document.getElementById('eraseBtn').classList.toggle('active', mode === 0);
+        }}
+
+        function clearGrid() {{
+          for (let r = 0; r < rows; r++) {{
+            for (let c = 0; c < cols; c++) {{
+              gridData[r][c] = 0;
+            }}
+          }}
+          document.querySelectorAll('.cell').forEach(el => el.classList.remove('filled'));
+          sendDataToStreamlit();
+        }}
+
+        function sendDataToStreamlit() {{
+          const strData = JSON.stringify(gridData);
+          window.parent.postMessage({{
+            type: 'streamlit:setComponentValue',
+            value: strData
+          }}, '*');
+        }}
+
+        createGrid();
+      </script>
+    </body>
+    </html>
+    """
+
+    col_canvas, col_info = st.columns([1.3, 1])
+    with col_canvas:
+        drawn_json_str = components.html(custom_canvas_html, height=min(600, grid_h * 18 + 100))
+
+    # 사용자 편집 데이터 수신
+    if drawn_json_str:
+        try:
+            parsed_matrix = json.loads(drawn_json_str)
+            if len(parsed_matrix) == grid_h and len(parsed_matrix[0]) == grid_w:
+                st.session_state[canvas_session_key] = parsed_matrix
+        except Exception:
+            pass
+
+    target = np.array(st.session_state[canvas_session_key], dtype=float)
     layout_name = f"Custom_{grid_w}x{grid_h}"
 
-    with col_preview:
+    with col_info:
         st.markdown("**실시간 패턴 프리뷰 (A)**")
-        fig_prev, ax_prev = plt.subplots(figsize=(5, 5 * (grid_h / grid_w)))
+        fig_prev, ax_prev = plt.subplots(figsize=(4.5, 4.5 * (grid_h / grid_w)))
         ax_prev.imshow(target, cmap='Blues', origin='upper', interpolation='nearest',
                        extent=[0, grid_w * unit_scale, grid_h * unit_scale, 0])
-        ax_prev.set_title("Current Drawn Pattern", fontsize=11, fontweight='bold')
+        ax_prev.set_title("Current Drawn Target (A)", fontsize=11, fontweight='bold')
         ax_prev.set_xlabel("X (nm)", fontsize=9)
         ax_prev.set_ylabel("Y (nm)", fontsize=9)
         ax_prev.xaxis.set_minor_locator(MultipleLocator(unit_scale))
@@ -113,12 +261,11 @@ else:
         target[10:20, 10:20] = 1.0
     layout_name = "Uploaded_CSV"
 
-# 세션 상태 관리 (마스크 싱크)
+# 세션 상태 관리 (마스크 동기화)
 if "current_mask" not in st.session_state or st.session_state.get("last_layout") != layout_name:
     st.session_state.current_mask = target.copy()
     st.session_state.last_layout = layout_name
 
-# 크기 변경 시 마스크 갱신
 if st.session_state.current_mask.shape != target.shape:
     st.session_state.current_mask = target.copy()
 
@@ -169,7 +316,7 @@ c_m1.metric("Grid Dimension", f"{w_px} × {h_px} px")
 c_m2.metric("Physical Size", f"{w_px * unit_scale:.1f} × {h_px * unit_scale:.1f} nm")
 c_m3.metric("Pattern Fidelity (IoU)", f"{iou:.2f}%", delta=f"{error_pixels} px Error", delta_color="inverse")
 
-# 4. 하단 4개 플롯 최적 정렬 함수
+# 4. 하단 4개 플롯 동적 배치
 def generate_analysis_plot():
     is_tall = aspect_ratio >= 1.4
     if is_tall:
@@ -200,7 +347,6 @@ def generate_analysis_plot():
     axes_flat[3].imshow(diff_view, origin='upper', extent=extent_nm, interpolation='nearest')
     axes_flat[3].set_title("(D) Superposition (G: Match, R: Under, B: Over)", fontsize=11, fontweight='bold')
 
-    # 축 눈금 공통 설정
     for ax in axes_flat:
         ax.set_xlabel("X (nm)", fontsize=10)
         ax.set_ylabel("Y (nm)", fontsize=10)
@@ -218,7 +364,7 @@ st.subheader("Lithography & OPC Analysis Result")
 fig_result = generate_analysis_plot()
 st.pyplot(fig_result)
 
-# 5. 마스크 제어 및 다운로드 파트
+# 5. 마스크 제어 및 내보내기
 st.subheader("OPC Modification & Export")
 ctrl_cols = st.columns(5 if layout_mode == "Interactive Grid Drawing" else 4)
 
@@ -235,7 +381,6 @@ with ctrl_cols[1]:
         st.rerun()
 
 with ctrl_cols[2]:
-    # 보정된 마스크 CSV
     mask_csv_buf = io.StringIO()
     np.savetxt(mask_csv_buf, st.session_state.current_mask.astype(int), delimiter=",", fmt="%d")
     st.download_button(
@@ -245,7 +390,6 @@ with ctrl_cols[2]:
         mime="text/csv"
     )
 
-# 3번 요구사항: 패턴 그리기 모드일 때만 나타나는 원본 Target CSV 다운로드 버튼
 if layout_mode == "Interactive Grid Drawing":
     with ctrl_cols[3]:
         drawn_csv_buf = io.StringIO()
@@ -261,7 +405,6 @@ else:
     btn_col_idx = 3
 
 with ctrl_cols[btn_col_idx]:
-    # 4개 그림 종합 분석 고해상도 플롯 다운로드
     img_buf = io.BytesIO()
     fig_result.savefig(img_buf, format='png', dpi=300, bbox_inches='tight')
     st.download_button(

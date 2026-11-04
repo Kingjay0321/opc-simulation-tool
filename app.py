@@ -14,7 +14,7 @@ st.caption("Standard Unit: 1 Grid = 3.5 nm × 3.5 nm (λ = 3.5 nm, Metal1 Wire W
 st.sidebar.header("Simulation Settings")
 layout_mode = st.sidebar.radio("Layout Input Mode", ["Preset Standard Cells", "Interactive Grid Drawing", "CSV File Upload"])
 
-unit_scale = 3.5  # nm/pixel
+unit_scale = 3.5  # nm per pixel
 
 # 2. 타겟 레이아웃 생성
 def get_inv_x1():
@@ -54,6 +54,8 @@ elif layout_mode == "Interactive Grid Drawing":
     grid_h = st.sidebar.number_input("Grid Height (Y, pixels)", min_value=10, max_value=60, value=20, step=1)
     
     st.info("Draw pattern below: Click or drag to draw wires (White = Pattern, Black = Space).")
+    target = np.zeros((int(grid_h), int(grid_w)), dtype=float)
+    
     try:
         from streamlit_drawable_canvas import st_canvas
         pixel_size = 15
@@ -65,27 +67,30 @@ elif layout_mode == "Interactive Grid Drawing":
             width=int(grid_w * pixel_size),
             height=int(grid_h * pixel_size),
             drawing_mode="freedraw",
-            key="canvas",
+            key=f"canvas_{grid_w}_{grid_h}",
         )
-        if canvas_result.image_data is not None:
-            gray = canvas_result.image_data[:, :, 0]
-            # 격자 크기로 다운샘플링
-            import cv2
-            resized = cv2.resize(gray, (int(grid_w), int(grid_h)), interpolation=cv2.INTER_NEAREST)
-            target = (resized > 127).astype(float)
-        else:
-            target = np.zeros((int(grid_h), int(grid_w)), dtype=float)
-    except ImportError:
-        # 라이브러리 빌드 대기 중 대체 모드
-        st.warning("Loading drawing module... Using empty grid canvas.")
+        
+        # 런타임 에러 방지 안전 블록
+        if canvas_result is not None:
+            raw_data = getattr(canvas_result, "image_data", None)
+            if raw_data is not None and len(raw_data.shape) == 3:
+                gray = raw_data[:, :, 0]
+                # 격자 단위 리샘플링
+                y_indices = np.linspace(0, gray.shape[0] - 1, int(grid_h)).astype(int)
+                x_indices = np.linspace(0, gray.shape[1] - 1, int(grid_w)).astype(int)
+                sampled = gray[np.ix_(y_indices, x_indices)]
+                target = (sampled > 100).astype(float)
+    except Exception:
+        st.warning("Using basic blank canvas mode.")
         target = np.zeros((int(grid_h), int(grid_w)), dtype=float)
-        target[2:8, 2:8] = 1.0
+        
     layout_name = f"Custom_{grid_w}x{grid_h}"
 
 else:
     uploaded_file = st.sidebar.file_uploader("Upload CSV (0 and 1 matrix)", type=["csv"])
     if uploaded_file is not None:
         target = np.genfromtxt(uploaded_file, delimiter=",").astype(float)
+        target = np.nan_to_num(target, nan=0.0)
     else:
         target = np.zeros((30, 30), dtype=float)
         target[10:20, 10:20] = 1.0
@@ -126,7 +131,7 @@ max_val = np.max(exposure) if np.max(exposure) > 0 else 1.0
 norm_exposure = exposure / max_val
 printed = (norm_exposure >= threshold).astype(float)
 
-# 정량적 분석 지표 (IoU & EPE)
+# 정량적 분석 지표 (IoU & 오차)
 intersection = np.logical_and(target == 1, printed == 1).sum()
 union = np.logical_or(target == 1, printed == 1).sum()
 iou = (intersection / union) * 100 if union > 0 else 0.0
@@ -134,6 +139,7 @@ error_pixels = int(union - intersection)
 
 h_px, w_px = target.shape
 extent_nm = [0, w_px * unit_scale, h_px * unit_scale, 0]
+aspect_ratio = h_px / w_px
 
 # 메트릭 표시
 st.subheader("Quantitative Evaluation")
@@ -142,22 +148,28 @@ c_m1.metric("Grid Dimension", f"{w_px} × {h_px} px")
 c_m2.metric("Physical Size", f"{w_px * unit_scale:.1f} × {h_px * unit_scale:.1f} nm")
 c_m3.metric("Pattern Fidelity (IoU)", f"{iou:.2f}%", delta=f"{error_pixels} px Error", delta_color="inverse")
 
-# 4. 시각화 (2x2 Grid 구성: A, B / C, D)
-def generate_2x2_plot():
-    fig, axes = plt.subplots(2, 2, figsize=(14, 14), constrained_layout=True)
+# 4. 동적 플롯 생성 (길쭉하면 1x4, 정사각/가로형이면 2x2)
+def generate_adaptive_plot():
+    is_tall = aspect_ratio >= 1.4  # 세로가 긴 형태 판별
     
+    if is_tall:
+        fig, axes_flat = plt.subplots(1, 4, figsize=(22, 8), constrained_layout=True)
+    else:
+        fig, axes = plt.subplots(2, 2, figsize=(14, 14), constrained_layout=True)
+        axes_flat = axes.flatten()
+
     # (A) Target Pattern
-    axes[0, 0].imshow(target, cmap='Blues', origin='upper', extent=extent_nm, interpolation='nearest')
-    axes[0, 0].set_title("(A) Target Pattern", fontsize=14, fontweight='bold')
+    axes_flat[0].imshow(target, cmap='Blues', origin='upper', extent=extent_nm, interpolation='nearest')
+    axes_flat[0].set_title("(A) Target Pattern", fontsize=13, fontweight='bold')
     
     # (B) Current Mask
-    axes[0, 1].imshow(st.session_state.current_mask, cmap='bone_r', origin='upper', extent=extent_nm, interpolation='nearest')
-    axes[0, 1].set_title("(B) Current Mask (Input)", fontsize=14, fontweight='bold')
+    axes_flat[1].imshow(st.session_state.current_mask, cmap='bone_r', origin='upper', extent=extent_nm, interpolation='nearest')
+    axes_flat[1].set_title("(B) Current Mask (Input)", fontsize=13, fontweight='bold')
     
     # (C) Aerial Image
-    im_c = axes[1, 0].imshow(norm_exposure, cmap='inferno', origin='upper', extent=extent_nm, interpolation='bilinear')
-    axes[1, 0].set_title("(C) Aerial Image Intensity", fontsize=14, fontweight='bold')
-    plt.colorbar(im_c, ax=axes[1, 0], fraction=0.046, pad=0.04)
+    im_c = axes_flat[2].imshow(norm_exposure, cmap='inferno', origin='upper', extent=extent_nm, interpolation='bilinear')
+    axes_flat[2].set_title("(C) Aerial Image Intensity", fontsize=13, fontweight='bold')
+    plt.colorbar(im_c, ax=axes_flat[2], fraction=0.046, pad=0.04)
     
     # (D) Superposition Analysis
     diff_view = np.zeros((*target.shape, 3))
@@ -165,13 +177,13 @@ def generate_2x2_plot():
     diff_view[(target == 1) & (printed == 0)] = [0.95, 0.1, 0.1]  # 수축/미전사 (빨강)
     diff_view[(target == 0) & (printed == 1)] = [0.1, 0.4, 0.95]  # 번짐/과도현상 (파랑)
     
-    axes[1, 1].imshow(diff_view, origin='upper', extent=extent_nm, interpolation='nearest')
-    axes[1, 1].set_title("(D) Superposition (Green: Match, Red: Under, Blue: Over)", fontsize=13, fontweight='bold')
+    axes_flat[3].imshow(diff_view, origin='upper', extent=extent_nm, interpolation='nearest')
+    axes_flat[3].set_title("(D) Superposition (G: Match, R: Under, B: Over)", fontsize=12, fontweight='bold')
     
-    # 축 포맷 공통화
-    for ax in axes.flat:
-        ax.set_xlabel("X Position (nm)", fontsize=11)
-        ax.set_ylabel("Y Position (nm)", fontsize=11)
+    # 축 눈금 포맷
+    for ax in axes_flat:
+        ax.set_xlabel("X Position (nm)", fontsize=10)
+        ax.set_ylabel("Y Position (nm)", fontsize=10)
         ax.xaxis.set_major_locator(MultipleLocator(21.0))
         ax.yaxis.set_major_locator(MultipleLocator(31.5))
         if show_grid:
@@ -182,10 +194,10 @@ def generate_2x2_plot():
             
     return fig
 
-fig_2x2 = generate_2x2_plot()
-st.pyplot(fig_2x2)
+fig_result = generate_adaptive_plot()
+st.pyplot(fig_result)
 
-# 5. 마스크 제어 및 다운로드
+# 5. 마스크 제어 및 정밀 다운로드 기능
 st.subheader("OPC Modification & Export")
 c1, c2, c3, c4 = st.columns(4)
 
@@ -196,16 +208,16 @@ with c1:
 
 with c2:
     if st.button("Apply Quick Bias/OPC"):
-        from scipy.ndimage import binary_dilation, binary_erosion
-        # 모서리 보정 시연용 필터
+        from scipy.ndimage import binary_dilation
+        # 모서리 Serif 및 선 끝 확장 효과
         dilated = binary_dilation(target, iterations=1)
-        eroded = binary_erosion(target, iterations=1)
         st.session_state.current_mask = np.where(target == 1, target, (dilated.astype(float) * 0.5))
         st.rerun()
 
 with c3:
     csv_buf = io.StringIO()
-    np.savetxt(csv_buf, st.session_state.current_mask, delimiter=",", fmt="%.1f")
+    # 0과 1의 깔끔한 정수형(int) 포맷으로 내보내기
+    np.savetxt(csv_buf, st.session_state.current_mask.astype(int), delimiter=",", fmt="%d")
     st.download_button(
         label="Download Mask (CSV)",
         data=csv_buf.getvalue(),
@@ -215,10 +227,11 @@ with c3:
 
 with c4:
     img_buf = io.BytesIO()
-    fig_2x2.savefig(img_buf, format='png', dpi=300, bbox_inches='tight')
+    # 고해상도(300 DPI) 논문용 분석 이미지 내보내기
+    fig_result.savefig(img_buf, format='png', dpi=300, bbox_inches='tight')
     st.download_button(
-        label="Download 2x2 Plot (PNG)",
+        label="Download Analysis Plot (PNG)",
         data=img_buf.getvalue(),
-        file_name=f"{layout_name}_2x2_analysis.png",
+        file_name=f"{layout_name}_analysis_plot.png",
         mime="image/png"
     )

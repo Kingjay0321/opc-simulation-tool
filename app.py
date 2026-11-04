@@ -442,14 +442,12 @@ def draw_dimension_arrows(ax):
 def overlay_target_outline(ax):
     if not show_outline:
         return
-    # extent_nm: [0, width_nm, height_nm, 0] 매핑으로 상하 방향 완벽 일치
     ax.contour(target, levels=[0.5], colors=['#ffffff'], linestyles=['--'], linewidths=[1.3],
                extent=[0, width_nm, height_nm, 0], origin='upper')
 
-# 10. 전/후 명확 분리 종합 비교 분석 플롯
+# 10. 전/후 명확 분리 종합 비교 분석 플롯 (버그 완벽 수정)
 def generate_comprehensive_plot():
     fig = plt.figure(figsize=(22, 13))
-    # 상하 2개 섹션 사이 여백을 넉넉히 확보
     subfigs = fig.subfigures(2, 1, hspace=0.14)
 
     major_x = 21.0 if width_nm > 40 else 10.5
@@ -503,10 +501,10 @@ def generate_comprehensive_plot():
     overlay_target_outline(axes_bot[2])
     subfigs[1].colorbar(im_c1, ax=axes_bot[2], fraction=0.046, pad=0.04)
 
-    # (3) After Superposition
+    # (3) After Superposition (printed -> printed_after 완벽 수정)
     diff_after = np.zeros((*target.shape, 3))
     diff_after[(target == 1) & (printed_after == 1)] = [0.1, 0.85, 0.1]
-    diff_after[(target == 1) & (printed == 0)] = [0.95, 0.1, 0.1]
+    diff_after[(target == 1) & (printed_after == 0)] = [0.95, 0.1, 0.1]
     diff_after[(target == 0) & (printed_after == 1)] = [0.1, 0.4, 0.95]
     axes_bot[3].imshow(diff_after, origin='upper', extent=extent_nm, interpolation='nearest')
     axes_bot[3].set_title(f"(D-2) Superposition (After)\nIoU: {iou_after:.2f}% ({error_a}px error)", fontsize=11, fontweight='bold')

@@ -327,13 +327,13 @@ else:
         raw_target[10:20, 10:20] = 1.0
     layout_name = "Uploaded_CSV"
 
-# 4. 정수 4배 분할 서브그리드 확장 (에일리어싱 완전 제거)
+# 4. 정수 4배 분할 서브그리드 확장
 padded_target = np.pad(raw_target, pad_grids, mode='constant', constant_values=0.0)
 h_grids, w_grids = padded_target.shape
 total_w_nm = w_grids * target_unit_nm
 total_h_nm = h_grids * target_unit_nm
 
-# 각 3.5nm 그리드를 4x4의 0.875nm 서브픽셀로 정수 복제 (선폭 왜곡 제로)
+# 각 3.5nm 그리드를 4x4의 0.875nm 서브픽셀로 정수 복제
 target_sub = np.repeat(np.repeat(padded_target, subgrid_ratio, axis=0), subgrid_ratio, axis=1)
 
 extent_nm = [0, total_w_nm, total_h_nm, 0]
@@ -381,10 +381,8 @@ def evaluate_context_aware_yield(target_mat, printed_mat):
     union = np.logical_or(target_mat == 1, printed_mat == 1).sum()
     strict_iou = (inter / union) * 100.0 if union > 0 else 0.0
 
-    # 서브픽셀 단위 거리
     space_to_wire_nm = distance_transform_edt(target_mat == 0) * mask_unit_nm
 
-    # 배선 척추 코어 (중심 5nm 선폭 보존)
     struct_sq = generate_binary_structure(2, 1)
     core = binary_erosion(target_mat, structure=struct_sq, iterations=int(round(2.5 / mask_unit_nm))).astype(float)
 
@@ -394,7 +392,6 @@ def evaluate_context_aware_yield(target_mat, printed_mat):
     crit_open = np.logical_and(under_mask, core == 1).sum()
     marginal_shrink = under_mask.sum() - crit_open
 
-    # 인접 배선 7nm 이내 위험 구역 번짐
     crit_short = np.logical_and(over_mask, space_to_wire_nm <= 7.0).sum()
     allowable_serif = over_mask.sum() - crit_short
 
@@ -483,16 +480,18 @@ def overlay_target_outline(ax):
     ax.contour(target_sub, levels=[0.5], colors=['#ffffff'], linestyles=['--'], linewidths=[1.4],
                extent=[0, total_w_nm, total_h_nm, 0], origin='upper')
 
-# 12. 전/후 종합 비교 분석 플롯
+# 12. 전/후 종합 비교 분석 플롯 (간격 대폭 압축 & 파라미터 박스 우측 정렬)
 def generate_comprehensive_plot():
-    fig = plt.figure(figsize=(22.5, 17.5), facecolor='#ffffff')
+    # 상하 간격을 좁혀 한눈에 들어오도록 피규어 높이 최적화
+    fig = plt.figure(figsize=(22.5, 14.5), facecolor='#ffffff')
 
+    # GridSpec 2단 구조로 직접 압축 배치
     gs = fig.add_gridspec(
-        3, 4,
-        height_ratios=[1.0, 0.18, 1.0],
-        hspace=0.45,
+        2, 4,
+        height_ratios=[1.0, 1.0],
+        hspace=0.28,
         wspace=0.22,
-        left=0.06, right=0.95, top=0.93, bottom=0.04
+        left=0.06, right=0.95, top=0.93, bottom=0.05
     )
 
     major_x = 21.0 if total_w_nm > 50 else 10.5
@@ -500,87 +499,87 @@ def generate_comprehensive_plot():
 
     # ------------------ ROW 0: BEFORE OPC ------------------
     ax_top = [fig.add_subplot(gs[0, c]) for c in range(4)]
-    fig.text(0.06, 0.965, "SECTION 1: BEFORE OPC (Conventional Mask on 0.875nm Sub-grid)",
-             fontsize=14, fontweight='heavy', color='#b71c1c', ha='left')
+    fig.text(0.06, 0.955, "SECTION 1: BEFORE OPC (Conventional Mask on 0.875nm Sub-grid)",
+             fontsize=13, fontweight='heavy', color='#b71c1c', ha='left')
 
     ax_top[0].imshow(target_sub, cmap='Blues', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
-    ax_top[0].set_title("(A) Target Pattern\n(Design Specification: 3.5nm Grid)", fontsize=11, fontweight='bold', pad=12)
+    ax_top[0].set_title("(A) Target Pattern\n(Design Specification: 3.5nm Grid)", fontsize=10.5, fontweight='bold', pad=10)
     draw_dimension_arrows(ax_top[0])
 
     ax_top[1].imshow(target_sub, cmap='Purples', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
-    ax_top[1].set_title("(B-1) Before Mask (No OPC)\n(0.875nm Sub-pixel Raw Mask)", fontsize=11, fontweight='bold', pad=12)
+    ax_top[1].set_title("(B-1) Before Mask (No OPC)\n(0.875nm Sub-pixel Raw Mask)", fontsize=10.5, fontweight='bold', pad=10)
 
     im_c0 = ax_top[2].imshow(norm_exp_before, cmap='inferno', origin='upper', extent=extent_nm, interpolation='bilinear', vmin=0.0, vmax=1.0)
-    ax_top[2].set_title("(C-1) Aerial Image (Before)\n(Intensity Profile: σ=6.5nm)", fontsize=11, fontweight='bold', pad=12)
+    ax_top[2].set_title("(C-1) Aerial Image (Before)\n(Intensity Profile: σ=6.5nm)", fontsize=10.5, fontweight='bold', pad=10)
     overlay_target_outline(ax_top[2])
     cbar0 = fig.colorbar(im_c0, ax=ax_top[2], fraction=0.046, pad=0.04)
-    cbar0.ax.tick_params(labelsize=9)
+    cbar0.ax.tick_params(labelsize=8.5)
 
     diff_before = np.zeros((*target_sub.shape, 3))
     diff_before[(target_sub == 1) & (printed_before == 1)] = [0.1, 0.85, 0.1]
     diff_before[(target_sub == 1) & (printed_before == 0)] = [0.95, 0.1, 0.1]
     diff_before[(target_sub == 0) & (printed_before == 1)] = [0.1, 0.4, 0.95]
     ax_top[3].imshow(diff_before, origin='upper', extent=extent_nm, interpolation='nearest')
-    ax_top[3].set_title(f"(D-1) Superposition (Before)\nDFM Yield: {stats_b['dfm_yield']:.1f}% (IoU {stats_b['strict_iou']:.1f}%)", fontsize=11, fontweight='bold', pad=12)
+    ax_top[3].set_title(f"(D-1) Superposition (Before)\nDFM Yield: {stats_b['dfm_yield']:.1f}% (IoU {stats_b['strict_iou']:.1f}%)", fontsize=10.5, fontweight='bold', pad=10)
     overlay_target_outline(ax_top[3])
 
-    # ------------------ ROW 1: MIDDLE PARAMETER BRIDGE (0.875nm & 4x Reticle) ------------------
-    ax_mid = fig.add_subplot(gs[1, :])
-    ax_mid.axis('off')
+    # ------------------ 가운데 영역: 좌측 제목 & 우측 파라미터 박스 ------------------
+    # 왼쪽 제목
+    fig.text(0.06, 0.485, "SECTION 2: AFTER OPC (0.875nm Fine-Tuned Sub-grid OPC Optimization)",
+             fontsize=13, fontweight='heavy', color='#1b5e20', ha='left', va='center')
 
+    # 오른쪽 파라미터 요약 카드 (가운데 오른쪽 정렬)
     summary_text = (
-        f"  [SUB-GRID SPEC] Target Grid: {target_unit_nm} nm (λ)  |  Mask Sub-grid: {mask_unit_nm:.3f} nm/px (1/4 Grid)  |  4x Reticle: {reticle_feature_nm:.1f} nm E-beam Unit\n"
-        f"  [LITHO CONFIG] Optical PSF Diffusion: σ = {sigma_nm:.1f} nm  |  Resist Threshold: I_th = {threshold:.2f}  |  Wire Pitch: 10.5 nm\n"
-        f"  [DFM YIELD ADVANTAGE] Effective Yield: {stats_b['dfm_yield']:.1f}% ──▶ {stats_a['dfm_yield']:.1f}% ({dfm_delta:+.1f}%p)  |  "
+        f"[SUB-GRID] Target: {target_unit_nm}nm | Mask: {mask_unit_nm:.3f}nm | 4x Reticle: {reticle_feature_nm:.1f}nm  |  "
+        f"PSF: σ={sigma_nm:.1f}nm, I_th={threshold:.2f}\n"
+        f"[PERFORMANCE] DFM Yield: {stats_b['dfm_yield']:.1f}% ──▶ {stats_a['dfm_yield']:.1f}% ({dfm_delta:+.1f}%p)  |  "
         f"Strict IoU: {stats_b['strict_iou']:.1f}% ──▶ {stats_a['strict_iou']:.1f}%\n"
-        f"  [DEFECT METRICS] Fatal Disconnections (Open): {stats_b['crit_open']} px ──▶ {stats_a['crit_open']} px ({open_saved:+} px Saved)  |  "
-        f"Short Hazards: {stats_b['crit_short']} px ──▶ {stats_a['crit_short']} px"
+        f"[CRITICAL DEFECT] Fatal Opens: {stats_b['crit_open']}px ──▶ {stats_a['crit_open']}px ({open_saved:+}px Saved)  |  "
+        f"Short Hazards: {stats_b['crit_short']}px ──▶ {stats_a['crit_short']}px"
     )
 
-    ax_mid.text(
-        0.5, 0.62, summary_text,
-        fontsize=10.5, family='monospace', fontweight='bold', color='#0f172a',
-        ha='center', va='center',
+    fig.text(
+        0.95, 0.485, summary_text,
+        fontsize=8.5, family='monospace', fontweight='bold', color='#0f172a',
+        ha='right', va='center',
         bbox=dict(
-            boxstyle='round,pad=0.8',
+            boxstyle='round,pad=0.5',
             facecolor='#f8fafc',
             edgecolor='#2563eb',
-            linewidth=1.8,
+            linewidth=1.4,
             alpha=0.98
         )
     )
 
-    # ------------------ ROW 2: AFTER OPC ------------------
-    ax_bot = [fig.add_subplot(gs[2, c]) for c in range(4)]
-    fig.text(0.06, 0.465, "SECTION 2: AFTER OPC (0.875nm Fine-Tuned Sub-grid OPC Optimization)",
-             fontsize=14, fontweight='heavy', color='#1b5e20', ha='left')
+    # ------------------ ROW 1: AFTER OPC ------------------
+    ax_bot = [fig.add_subplot(gs[1, c]) for c in range(4)]
 
     ax_bot[0].imshow(target_sub, cmap='Blues', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
-    ax_bot[0].set_title("(A) Target Reference\n(Golden Target Layout)", fontsize=11, fontweight='bold', pad=12)
+    ax_bot[0].set_title("(A) Target Reference\n(Golden Target Layout)", fontsize=10.5, fontweight='bold', pad=10)
 
     ax_bot[1].imshow(st.session_state.current_mask_sub, cmap='Purples', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
-    ax_bot[1].set_title("(B-2) After Mask (0.875nm Sub-grid)\n(4x Reticle: 3.5nm E-beam Serifs)", fontsize=11, fontweight='bold', pad=12)
+    ax_bot[1].set_title("(B-2) After Mask (0.875nm Sub-grid)\n(4x Reticle: 3.5nm E-beam Serifs)", fontsize=10.5, fontweight='bold', pad=10)
 
     im_c1 = ax_bot[2].imshow(norm_exp_after, cmap='inferno', origin='upper', extent=extent_nm, interpolation='bilinear', vmin=0.0, vmax=1.0)
-    ax_bot[2].set_title("(C-2) Aerial Image (After)\n(Sub-grid Corrected Intensity)", fontsize=11, fontweight='bold', pad=12)
+    ax_bot[2].set_title("(C-2) Aerial Image (After)\n(Sub-grid Corrected Intensity)", fontsize=10.5, fontweight='bold', pad=10)
     overlay_target_outline(ax_bot[2])
     cbar1 = fig.colorbar(im_c1, ax=ax_bot[2], fraction=0.046, pad=0.04)
-    cbar1.ax.tick_params(labelsize=9)
+    cbar1.ax.tick_params(labelsize=8.5)
 
     diff_after = np.zeros((*target_sub.shape, 3))
     diff_after[(target_sub == 1) & (printed_after == 1)] = [0.1, 0.85, 0.1]
     diff_after[(target_sub == 1) & (printed_after == 0)] = [0.95, 0.1, 0.1]
     diff_after[(target_sub == 0) & (printed_after == 1)] = [0.1, 0.4, 0.95]
     ax_bot[3].imshow(diff_after, origin='upper', extent=extent_nm, interpolation='nearest')
-    ax_bot[3].set_title(f"(D-2) Superposition (After)\nDFM Yield: {stats_a['dfm_yield']:.1f}% (IoU {stats_a['strict_iou']:.1f}%)", fontsize=11, fontweight='bold', pad=12)
+    ax_bot[3].set_title(f"(D-2) Superposition (After)\nDFM Yield: {stats_a['dfm_yield']:.1f}% (IoU {stats_a['strict_iou']:.1f}%)", fontsize=10.5, fontweight='bold', pad=10)
     overlay_target_outline(ax_bot[3])
 
     for ax in ax_top + ax_bot:
-        ax.set_xlabel("X Position (nm)", fontsize=9.5, fontweight='bold')
-        ax.set_ylabel("Y Position (nm)", fontsize=9.5, fontweight='bold')
+        ax.set_xlabel("X Position (nm)", fontsize=9, fontweight='bold')
+        ax.set_ylabel("Y Position (nm)", fontsize=9, fontweight='bold')
         ax.xaxis.set_major_locator(MultipleLocator(major_x))
         ax.yaxis.set_major_locator(MultipleLocator(major_y))
-        ax.tick_params(axis='both', which='major', labelsize=8.5)
+        ax.tick_params(axis='both', which='major', labelsize=8)
         if show_grid:
             ax.xaxis.set_minor_locator(MultipleLocator(target_unit_nm))
             ax.yaxis.set_minor_locator(MultipleLocator(target_unit_nm))
@@ -603,19 +602,17 @@ def run_subgrid_opc(target_mat_sub, opt_kernel, opt_th, iterations=8):
 
     space_to_wire_nm = distance_transform_edt(base == 0) * mask_unit_nm
 
-    # 0.875 nm 서브픽셀 단위 미세 돌출 (코너 2~3 sub-pixels, 끝단 3~4 sub-pixels 연장)
+    # 0.875 nm 서브픽셀 단위 미세 돌출
     pad = np.pad(base, 3, mode='constant', constant_values=0)
     for r in range(h):
         for c in range(w):
             center = pad[r+3, c+3]
             if center == 0:
-                # 쇼트 위험 없는 외곽 빈 공간(>7nm)에만 정밀 세리프 부착
                 if space_to_wire_nm[r, c] > 7.0:
                     corner_window = pad[r:r+7, c:c+7]
                     if np.sum(corner_window) >= 24:
                         mask[r, c] = 1.0
             elif center == 1:
-                # 상하 선 끝단(Line-End) 3~4 sub-pixels (약 2.6~3.5 nm) 정밀 연장
                 up, down = pad[r+2, c+3], pad[r+4, c+3]
                 if (up == 0 and down == 1) or (up == 1 and down == 0):
                     if r > 2 and pad[r+2, c+3] == 0:
@@ -626,7 +623,6 @@ def run_subgrid_opc(target_mat_sub, opt_kernel, opt_th, iterations=8):
     if is_symmetric:
         mask = np.maximum(mask, np.fliplr(mask))
 
-    # 오차 역확산 ILT 루프
     k_diff = int(round(sigma_px * 1.5)) | 1
     ax_d = np.linspace(-(k_diff // 2), k_diff // 2, k_diff)
     xd, yd = np.meshgrid(ax_d, ax_d)
@@ -645,7 +641,7 @@ def run_subgrid_opc(target_mat_sub, opt_kernel, opt_th, iterations=8):
 
         cont_mask += 0.40 * grad
         cont_mask = np.clip(cont_mask, 0.0, 1.0)
-        cont_mask = np.maximum(cont_mask, base)  # 원본 선폭 골격 절대 보존
+        cont_mask = np.maximum(cont_mask, base)
 
         if is_symmetric:
             cont_mask = 0.5 * (cont_mask + np.fliplr(cont_mask))

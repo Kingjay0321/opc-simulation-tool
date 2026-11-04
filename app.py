@@ -6,13 +6,14 @@ from matplotlib.ticker import MultipleLocator
 from scipy.ndimage import convolve
 import json
 import io
+import os
 
 st.set_page_config(page_title="OPC Simulation Tool", layout="wide")
 st.title("Optical Proximity Correction (OPC) Tool")
 st.markdown("**7nm FinFET Standard Cell Metal1 Layout Simulation & Correction Platform**")
 st.caption("Standard Unit: 1 Grid = 3.5 nm × 3.5 nm (λ = 3.5 nm, Metal1 Wire Width = 3 Grid = 10.5 nm)")
 
-unit_scale = 3.5  # nm/pixel
+unit_scale = 3.5  # nm per pixel
 
 # 1. 사이드바 설정
 st.sidebar.header("Simulation Settings")
@@ -45,6 +46,209 @@ def get_nand2_x4():
     mask[30:48, 30:33] = 1.0
     return mask
 
+# 양방향 통신 전용 커스텀 컴포넌트 빌더 함수
+def build_pixel_grid_component():
+    current_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else os.getcwd()
+    comp_dir = os.path.join(current_dir, "pixel_grid_component")
+    os.makedirs(comp_dir, exist_ok=True)
+    html_file = os.path.join(comp_dir, "index.html")
+
+    html_code = """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {
+      user-select: none;
+      -webkit-user-select: none;
+      font-family: monospace, sans-serif;
+      background: #f0f2f6;
+      margin: 0;
+      padding: 6px;
+    }
+    .controls {
+      margin-bottom: 8px;
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .btn {
+      padding: 6px 12px;
+      border: 2px outset #ffffff;
+      background: #d4d0c8;
+      font-weight: bold;
+      cursor: pointer;
+      border-radius: 3px;
+      font-size: 11px;
+    }
+    .btn:active {
+      border-style: inset;
+    }
+    .btn.active {
+      background: #1a4b8c;
+      color: white;
+      border-style: inset;
+    }
+    .btn.action {
+      background: #2e7d32;
+      color: white;
+    }
+    #grid-container {
+      display: grid;
+      gap: 1px;
+      background-color: #7b7b7b;
+      padding: 4px;
+      border: 3px inset #c0c0c0;
+      width: fit-content;
+      max-height: 480px;
+      overflow: auto;
+    }
+    .cell {
+      width: 16px;
+      height: 16px;
+      background-color: #c0c0c0;
+      border-top: 1px solid #ffffff;
+      border-left: 1px solid #ffffff;
+      border-right: 1px solid #808080;
+      border-bottom: 1px solid #808080;
+      box-sizing: border-box;
+      cursor: crosshair;
+    }
+    .cell.filled {
+      background-color: #1a4b8c !important;
+      border: 1px solid #0d2b56 !important;
+    }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <button id="drawBtn" class="btn active" onclick="setMode(1)">✏️ 그리기 (1)</button>
+    <button id="eraseBtn" class="btn" onclick="setMode(0)">🧹 지우개 (0)</button>
+    <button id="toggleBtn" class="btn" onclick="setMode(2)">🔄 토글 모드</button>
+    <button class="btn" onclick="clearGrid()">🗑️ 전체 리셋</button>
+    <button class="btn action" onclick="sendDataToStreamlit()">⚡ 즉시 적용</button>
+    <span id="dim-label" style="font-size:11px; color:#555;"></span>
+  </div>
+  <div id="grid-container"></div>
+
+  <script>
+    let isDrawing = false;
+    let drawMode = 1; // 1: Draw, 0: Erase, 2: Toggle
+    let toggleTargetVal = 1;
+    let rows = 20;
+    let cols = 20;
+    let gridData = [];
+
+    const container = document.getElementById('grid-container');
+
+    function sendMsg(type, data) {
+      window.parent.postMessage({
+        isStreamlitMessage: true,
+        type: type,
+        ...data
+      }, "*");
+    }
+
+    function initGrid() {
+      container.innerHTML = '';
+      container.style.gridTemplateColumns = `repeat(${cols}, 16px)`;
+      container.style.gridTemplateRows = `repeat(${rows}, 16px)`;
+      document.getElementById('dim-label').innerText = `크기: ${cols} × ${rows}`;
+
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const cell = document.createElement('div');
+          cell.classList.add('cell');
+          cell.id = `cell_${r}_${c}`;
+          if (gridData[r] && gridData[r][c] === 1) {
+            cell.classList.add('filled');
+          }
+
+          cell.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            isDrawing = true;
+            if (drawMode === 2) {
+              toggleTargetVal = gridData[r][c] === 1 ? 0 : 1;
+              applyCell(cell, r, c, toggleTargetVal);
+            } else {
+              applyCell(cell, r, c, drawMode);
+            }
+          });
+
+          cell.addEventListener('mouseenter', () => {
+            if (isDrawing) {
+              applyCell(cell, r, c, drawMode === 2 ? toggleTargetVal : drawMode);
+            }
+          });
+
+          container.appendChild(cell);
+        }
+      }
+      sendMsg("streamlit:setFrameHeight", { height: Math.min(520, rows * 18 + 70) });
+    }
+
+    function applyCell(cell, r, c, val) {
+      gridData[r][c] = val;
+      if (val === 1) {
+        cell.classList.add('filled');
+      } else {
+        cell.classList.remove('filled');
+      }
+    }
+
+    window.addEventListener('mouseup', () => {
+      if (isDrawing) {
+        isDrawing = false;
+        sendDataToStreamlit();
+      }
+    });
+
+    function setMode(mode) {
+      drawMode = mode;
+      document.getElementById('drawBtn').classList.toggle('active', mode === 1);
+      document.getElementById('eraseBtn').classList.toggle('active', mode === 0);
+      document.getElementById('toggleBtn').classList.toggle('active', mode === 2);
+    }
+
+    function clearGrid() {
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          gridData[r][c] = 0;
+        }
+      }
+      document.querySelectorAll('.cell').forEach(el => el.classList.remove('filled'));
+      sendDataToStreamlit();
+    }
+
+    function sendDataToStreamlit() {
+      sendMsg("streamlit:setComponentValue", { value: gridData });
+    }
+
+    window.addEventListener("message", (event) => {
+      if (event.data.type === "streamlit:render") {
+        const args = event.data.args;
+        if (args) {
+          rows = args.rows || rows;
+          cols = args.cols || cols;
+          gridData = args.initial_matrix;
+          initGrid();
+        }
+      }
+    });
+
+    sendMsg("streamlit:componentReady", { apiVersion: 1 });
+  </script>
+</body>
+</html>
+"""
+    with open(html_file, "w", encoding="utf-8") as f:
+        f.write(html_code)
+
+    return components.declare_component("pixel_grid_editor", path=comp_dir)
+
+pixel_grid_component = build_pixel_grid_component()
+
 # 3. 레이아웃 모드별 타겟 생성
 if layout_mode == "Preset Standard Cells":
     preset_choice = st.sidebar.selectbox("Select Target Cell", ["INV_X1", "NAND2_X4"])
@@ -57,215 +261,28 @@ elif layout_mode == "Interactive Grid Drawing":
     grid_h = st.sidebar.number_input("Grid Height (Y, rows)", min_value=5, max_value=40, value=20, step=1)
 
     st.subheader("Minesweeper-Style Pixel Grid Editor")
-    st.markdown("💡 **그리기 / 지우개 / 토글 모드를 선택하고 마우스 드래그로 빠르게 패턴을 설정하세요.**")
+    st.markdown("💡 **그리기(1) / 지우개(0) / 토글 모드를 선택하고 격자판을 쓱 드래그하세요. 마우스를 놓으면 즉시 반영됩니다.**")
 
     matrix_key = f"matrix_{grid_w}_{grid_h}"
     if matrix_key not in st.session_state:
         st.session_state[matrix_key] = [[0 for _ in range(grid_w)] for _ in range(grid_h)]
 
-    # 크기가 달라졌을 때 세션 배열 크기 재조정
     if len(st.session_state[matrix_key]) != grid_h or len(st.session_state[matrix_key][0]) != grid_w:
         st.session_state[matrix_key] = [[0 for _ in range(grid_w)] for _ in range(grid_h)]
-
-    initial_matrix_json = json.dumps(st.session_state[matrix_key])
 
     col_canvas, col_preview = st.columns([1.2, 1])
 
     with col_canvas:
-        # 드로잉 캔버스 컴포넌트
-        custom_canvas_html = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <style>
-            body {{
-              user-select: none;
-              font-family: monospace, sans-serif;
-              background: #f0f2f6;
-              margin: 0;
-              padding: 6px;
-            }}
-            .controls {{
-              margin-bottom: 8px;
-              display: flex;
-              gap: 6px;
-              align-items: center;
-              flex-wrap: wrap;
-            }}
-            .btn {{
-              padding: 6px 10px;
-              border: 2px outset #ffffff;
-              background: #d4d0c8;
-              font-weight: bold;
-              cursor: pointer;
-              border-radius: 3px;
-              font-size: 11px;
-            }}
-            .btn:active {{
-              border-style: inset;
-            }}
-            .btn.active {{
-              background: #1a4b8c;
-              color: white;
-              border-style: inset;
-            }}
-            #grid-container {{
-              display: grid;
-              grid-template-columns: repeat({grid_w}, 16px);
-              grid-template-rows: repeat({grid_h}, 16px);
-              gap: 1px;
-              background-color: #7b7b7b;
-              padding: 4px;
-              border: 3px inset #c0c0c0;
-              width: fit-content;
-              max-height: 460px;
-              overflow: auto;
-            }}
-            .cell {{
-              width: 16px;
-              height: 16px;
-              background-color: #c0c0c0;
-              border-top: 1px solid #ffffff;
-              border-left: 1px solid #ffffff;
-              border-right: 1px solid #808080;
-              border-bottom: 1px solid #808080;
-              box-sizing: border-box;
-              cursor: crosshair;
-            }}
-            .cell.filled {{
-              background-color: #1a4b8c !important;
-              border: 1px solid #0d2b56 !important;
-            }}
-          </style>
-        </head>
-        <body>
-          <div class="controls">
-            <button id="drawBtn" class="btn active" onclick="setMode(1)">✏️ 그리기 (1)</button>
-            <button id="eraseBtn" class="btn" onclick="setMode(0)">🧹 지우개 (0)</button>
-            <button id="toggleBtn" class="btn" onclick="setMode(2)">🔄 토글 모드</button>
-            <button class="btn" onclick="clearGrid()">🗑️ 리셋</button>
-            <span style="font-size:11px; color:#555;">크기: {grid_w} × {grid_h}</span>
-          </div>
-          <div id="grid-container"></div>
-          
-          <script>
-            let isDrawing = false;
-            let drawMode = 1; // 1: Draw, 0: Erase, 2: Toggle
-            let dragTargetVal = 1;
-            const rows = {grid_h};
-            const cols = {grid_w};
-            let gridData = {initial_matrix_json};
-            const container = document.getElementById('grid-container');
-
-            function createGrid() {{
-              container.innerHTML = '';
-              for (let r = 0; r < rows; r++) {{
-                for (let c = 0; c < cols; c++) {{
-                  const cell = document.createElement('div');
-                  cell.classList.add('cell');
-                  cell.id = `cell_${{r}}_${{c}}`;
-                  if (gridData[r] && gridData[r][c] === 1) {{
-                    cell.classList.add('filled');
-                  }}
-
-                  cell.addEventListener('mousedown', (e) => {{
-                    e.preventDefault();
-                    isDrawing = true;
-                    if (drawMode === 2) {{
-                      dragTargetVal = gridData[r][c] === 1 ? 0 : 1;
-                      applyCell(cell, r, c, dragTargetVal);
-                    }} else {{
-                      applyCell(cell, r, c, drawMode);
-                    }}
-                  }});
-
-                  cell.addEventListener('mouseenter', () => {{
-                    if (isDrawing) {{
-                      applyCell(cell, r, c, drawMode === 2 ? dragTargetVal : drawMode);
-                    }}
-                  }});
-
-                  container.appendChild(cell);
-                }}
-              }}
-            }}
-
-            function applyCell(cell, r, c, val) {{
-              gridData[r][c] = val;
-              if (val === 1) {{
-                cell.classList.add('filled');
-              }} else {{
-                cell.classList.remove('filled');
-              }}
-            }}
-
-            window.addEventListener('mouseup', () => {{
-              if (isDrawing) {{
-                isDrawing = false;
-                syncToParent();
-              }}
-            }});
-
-            function setMode(mode) {{
-              drawMode = mode;
-              document.getElementById('drawBtn').classList.toggle('active', mode === 1);
-              document.getElementById('eraseBtn').classList.toggle('active', mode === 0);
-              document.getElementById('toggleBtn').classList.toggle('active', mode === 2);
-            }}
-
-            function clearGrid() {{
-              for (let r = 0; r < rows; r++) {{
-                for (let c = 0; c < cols; c++) {{
-                  gridData[r][c] = 0;
-                }}
-              }}
-              document.querySelectorAll('.cell').forEach(el => el.classList.remove('filled'));
-              syncToParent();
-            }}
-
-            function syncToParent() {{
-              const jsonStr = JSON.stringify(gridData);
-              const parentTextarea = window.parent.document.getElementById('hidden_grid_data');
-              if (parentTextarea) {{
-                parentTextarea.value = jsonStr;
-                parentTextarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
-              }}
-            }}
-
-            createGrid();
-          </script>
-        </body>
-        </html>
-        """
-        components.html(custom_canvas_html, height=min(510, grid_h * 18 + 70))
-
-        # 숨겨진 데이터 수신용 폼 (텍스트 상자 노출 차단)
-        st.markdown(
-            """
-            <style>
-            div[data-testid="stTextArea"]:has(#hidden_grid_data) {
-                display: none !important;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True
+        # 공식 양방향 컴포넌트로 데이터 직접 수신
+        component_output = pixel_grid_component(
+            rows=int(grid_h),
+            cols=int(grid_w),
+            initial_matrix=st.session_state[matrix_key],
+            key=f"grid_editor_{grid_w}_{grid_h}"
         )
 
-        with st.form("pattern_apply_form"):
-            raw_input = st.text_area(
-                "hidden_grid_data",
-                value=initial_matrix_json,
-                key="hidden_grid_data"
-            )
-            submitted = st.form_submit_button("⚡ 패턴 적용 및 시뮬레이션 갱신 (Apply)", type="primary")
-
-        if submitted and raw_input:
-            try:
-                parsed = json.loads(raw_input)
-                if len(parsed) == grid_h and len(parsed[0]) == grid_w:
-                    st.session_state[matrix_key] = parsed
-            except Exception:
-                pass
+        if component_output is not None:
+            st.session_state[matrix_key] = component_output
 
     target = np.array(st.session_state[matrix_key], dtype=float)
     layout_name = f"Custom_{grid_w}x{grid_h}"
@@ -275,7 +292,7 @@ elif layout_mode == "Interactive Grid Drawing":
         fig_prev, ax_prev = plt.subplots(figsize=(4.5, 4.5 * (grid_h / grid_w)))
         ax_prev.imshow(target, cmap='Blues', origin='upper', interpolation='nearest',
                        extent=[0, grid_w * unit_scale, grid_h * unit_scale, 0])
-        ax_prev.set_title("Current Target Pattern", fontsize=11, fontweight='bold')
+        ax_prev.set_title("Current Target Pattern (A)", fontsize=11, fontweight='bold')
         ax_prev.set_xlabel("X (nm)", fontsize=9)
         ax_prev.set_ylabel("Y (nm)", fontsize=9)
         ax_prev.xaxis.set_minor_locator(MultipleLocator(unit_scale))
@@ -293,13 +310,21 @@ else:
         target[10:20, 10:20] = 1.0
     layout_name = "Uploaded_CSV"
 
-# 4. 세션 상태 관리 (마스크 동기화)
+# 4. 세션 상태 관리 (마스크 및 타겟 실시간 동기화)
+target_hash = hash(target.tobytes())
 if "current_mask" not in st.session_state or st.session_state.get("last_layout") != layout_name:
     st.session_state.current_mask = target.copy()
     st.session_state.last_layout = layout_name
+    st.session_state.last_target_hash = target_hash
 
 if st.session_state.current_mask.shape != target.shape:
     st.session_state.current_mask = target.copy()
+    st.session_state.last_target_hash = target_hash
+
+# 새로 그렸을 때 시뮬레이션 마스크도 새 타겟과 즉시 동기화
+if st.session_state.get("last_target_hash") != target_hash:
+    st.session_state.current_mask = target.copy()
+    st.session_state.last_target_hash = target_hash
 
 # 5. 광학 파라미터 제어
 st.sidebar.subheader("Optical Lithography Parameters")
@@ -348,7 +373,7 @@ c_m1.metric("Grid Dimension", f"{w_px} × {h_px} px")
 c_m2.metric("Physical Size", f"{w_px * unit_scale:.1f} × {h_px * unit_scale:.1f} nm")
 c_m3.metric("Pattern Fidelity (IoU)", f"{iou:.2f}%", delta=f"{error_pixels} px Error", delta_color="inverse")
 
-# 6. 하단 4개 플롯 최적 동적 배치 (길쭉하면 1x4, 정사각이면 2x2)
+# 6. 하단 4개 플롯 최적 동적 배치 (세로형이면 1x4, 정사각이면 2x2)
 def generate_analysis_plot():
     is_tall = aspect_ratio >= 1.4
     if is_tall:

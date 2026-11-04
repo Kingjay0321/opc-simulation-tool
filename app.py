@@ -332,8 +332,8 @@ if st.session_state.current_mask.shape != target.shape:
 # 5. 광학 공정 파라미터 및 치수선 옵션
 st.sidebar.subheader("Optical Lithography Parameters")
 kernel_type = st.sidebar.radio("Optical Blur Kernel", ["Standard 5x5 Matrix", "2D Gaussian Function"])
-sigma = st.sidebar.slider("Gaussian Diffusion Radius (sigma, px)", 1.0, 3.5, 2.2, 0.1)
-threshold = st.sidebar.slider("Resist Threshold (I_th)", 0.20, 0.80, 0.55, 0.01)
+sigma = st.sidebar.slider("Gaussian Diffusion Radius (sigma, px)", 1.0, 3.5, 1.8, 0.1)
+threshold = st.sidebar.slider("Resist Threshold (I_th)", 0.20, 0.80, 0.50, 0.01)
 
 st.sidebar.subheader("Display Options")
 show_grid = st.sidebar.checkbox("Display Unit Grid (3.5 nm)", value=True)
@@ -358,7 +358,6 @@ else:
     kernel = kernel / np.sum(kernel)
 
 # 6. 정량적 전/후(Before vs After) 듀얼 시뮬레이션 연산
-# (1) 보정 전: 원본 마스크 기준
 exp_before = convolve(target, kernel, mode='constant', cval=0.0)
 max_eb = np.max(exp_before) if np.max(exp_before) > 0 else 1.0
 norm_exp_before = exp_before / max_eb
@@ -369,7 +368,6 @@ union_b = np.logical_or(target == 1, printed_before == 1).sum()
 iou_before = (inter_b / union_b) * 100.0 if union_b > 0 else 0.0
 error_b = int(union_b - inter_b)
 
-# (2) 보정 후: 현재 세션 마스크 기준
 exp_after = convolve(st.session_state.current_mask, kernel, mode='constant', cval=0.0)
 max_ea = np.max(exp_after) if np.max(exp_after) > 0 else 1.0
 norm_exp_after = exp_after / max_ea
@@ -445,17 +443,18 @@ def overlay_target_outline(ax):
     ax.contour(target, levels=[0.5], colors=['#ffffff'], linestyles=['--'], linewidths=[1.3],
                extent=[0, width_nm, height_nm, 0], origin='upper')
 
-# 10. 전/후 명확 분리 종합 비교 분석 플롯 (버그 완벽 수정)
+# 10. 전/후 명확 분리 종합 비교 분석 플롯 (우측 하단 파라미터 기술 카드 포함)
 def generate_comprehensive_plot():
-    fig = plt.figure(figsize=(22, 13))
-    subfigs = fig.subfigures(2, 1, hspace=0.14)
+    # 오른쪽 아래에 파라미터 텍스트 카드를 둘 수 있도록 하단 및 우측 패딩을 갖춘 피규어 구성
+    fig = plt.figure(figsize=(23, 14.2), facecolor='#ffffff')
+    subfigs = fig.subfigures(2, 1, hspace=0.18, height_ratios=[1, 1])
 
     major_x = 21.0 if width_nm > 40 else 10.5
     major_y = 31.5 if height_nm > 60 else 10.5
 
     # ------------------ TOP SECTION: BEFORE OPC ------------------
     subfigs[0].suptitle("SECTION 1: BEFORE OPC (Conventional Mask Simulation)",
-                         fontsize=14, fontweight='heavy', color='#b71c1c', x=0.08, ha='left')
+                         fontsize=14, fontweight='heavy', color='#b71c1c', x=0.07, ha='left')
     axes_top = subfigs[0].subplots(1, 4)
 
     # (0) Target Pattern
@@ -484,7 +483,7 @@ def generate_comprehensive_plot():
 
     # ------------------ BOTTOM SECTION: AFTER OPC ------------------
     subfigs[1].suptitle("SECTION 2: AFTER OPC (Inverse Lithography & Serif Optimization)",
-                         fontsize=14, fontweight='heavy', color='#1b5e20', x=0.08, ha='left')
+                         fontsize=14, fontweight='heavy', color='#1b5e20', x=0.07, ha='left')
     axes_bot = subfigs[1].subplots(1, 4)
 
     # (0) Target Reference
@@ -501,7 +500,7 @@ def generate_comprehensive_plot():
     overlay_target_outline(axes_bot[2])
     subfigs[1].colorbar(im_c1, ax=axes_bot[2], fraction=0.046, pad=0.04)
 
-    # (3) After Superposition (printed -> printed_after 완벽 수정)
+    # (3) After Superposition
     diff_after = np.zeros((*target.shape, 3))
     diff_after[(target == 1) & (printed_after == 1)] = [0.1, 0.85, 0.1]
     diff_after[(target == 1) & (printed_after == 0)] = [0.95, 0.1, 0.1]
@@ -522,6 +521,45 @@ def generate_comprehensive_plot():
             ax.grid(which='minor', color='gray', linestyle=':', linewidth=0.5, alpha=0.5)
             ax.grid(which='major', color='black', linestyle='--', linewidth=0.7, alpha=0.6)
 
+    # ------------------ 우측 하단 파라미터 기술 카드 (텍스트 박스) ------------------
+    kernel_str = f"2D Gaussian (sigma = {sigma:.2f} px)" if kernel_type == "2D Gaussian Function" else "Standard 5x5 Matrix"
+    summary_text = (
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        " [SIMULATION & OPC PARAMETER SPECIFICATION]\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"• Layout Name        : {layout_name} ({w_px} x {h_px} Grids)\n"
+        f"• Physical Dimension : {width_nm:.1f} nm x {height_nm:.1f} nm (1 Grid = {unit_scale} nm)\n"
+        f"• Metal1 Wire Pitch  : Minimum Line Width = 10.5 nm (3 Grids)\n"
+        f"• Optical Blur Kernel: {kernel_str}\n"
+        f"• Resist Threshold   : I_th = {threshold:.2f}\n"
+        f"• Optimization Model : Safe-Core Hybrid ILT & Outer Serif Loop\n"
+        "─────────────────────────────────────────────────────\n"
+        " [QUANTITATIVE PERFORMANCE VERIFICATION]\n"
+        "─────────────────────────────────────────────────────\n"
+        f"• Pattern Fidelity (IoU) : {iou_before:.2f}%  ──▶  {iou_after:.2f}% ({iou_delta:+.2f}%p)\n"
+        f"• Pixel Error Reduction : {error_b} px  ──▶  {error_a} px ({error_delta:+} px Saved)\n"
+        f"• Relative Improvement  : {(iou_delta/iou_before*100) if iou_before>0 else 0:+.1f}%\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    fig.text(
+        0.985, 0.015,
+        summary_text,
+        fontsize=9,
+        family='monospace',
+        fontweight='bold',
+        color='#1e293b',
+        ha='right',
+        va='bottom',
+        bbox=dict(
+            boxstyle='round,pad=0.8',
+            facecolor='#f8fafc',
+            edgecolor='#94a3b8',
+            linewidth=1.2,
+            alpha=0.96
+        )
+    )
+
     return fig
 
 st.subheader("Lithography & OPC Comprehensive Verification")
@@ -532,30 +570,27 @@ st.pyplot(fig_result)
 def run_iterative_opc(target_pattern, opt_kernel, opt_th, iterations=6):
     h, w = target_pattern.shape
     base = target_pattern.copy()
-    
-    # 1. 뼈대 보호: 원래 3픽셀 폭 배선의 중심선(Core Skeleton)은 절대 깎이지 않도록 잠금
+
+    # 1. 뼈대 보호: 원본 3픽셀 폭 배선의 중심선(Core Skeleton)은 침식 방지
     from scipy.ndimage import binary_erosion
     core_skeleton = binary_erosion(base, structure=np.ones((2, 2))).astype(float)
-    
     mask = base.copy()
-    
+
     # 2. 선 끝단(Line-End) 및 코너 세리프(Serif) 타겟 보정
     pad = np.pad(base, 1, mode='constant', constant_values=0)
     for r in range(h):
         for c in range(w):
             center = pad[r+1, c+1]
             if center == 0:
-                # 볼록 외곽 코너: 1픽셀 세리프 돌기 부착
                 neighbors_diag = [
-                    (pad[r, c+1], pad[r+1, c]),       # 좌상
-                    (pad[r, c+1], pad[r+1, c+2]),     # 우상
-                    (pad[r+2, c+1], pad[r+1, c]),     # 좌하
-                    (pad[r+2, c+1], pad[r+1, c+2])    # 우하
+                    (pad[r, c+1], pad[r+1, c]),
+                    (pad[r, c+1], pad[r+1, c+2]),
+                    (pad[r+2, c+1], pad[r+1, c]),
+                    (pad[r+2, c+1], pad[r+1, c+2])
                 ]
                 if any(v1 == 1 and v2 == 1 for v1, v2 in neighbors_diag):
                     mask[r, c] = 1.0
             elif center == 1:
-                # 선 끝단(Line-End): 상하 끝단을 1픽셀 연장하여 수축 차단
                 up, down = pad[r, c+1], pad[r+2, c+1]
                 if (up == 0 and down == 1) or (up == 1 and down == 0):
                     if r > 0 and pad[r, c+1] == 0:
@@ -563,19 +598,14 @@ def run_iterative_opc(target_pattern, opt_kernel, opt_th, iterations=6):
                     if r < h - 1 and pad[r+2, c+1] == 0:
                         mask[r+1, c] = 1.0
 
-    # 3. 모델 피드백 루프: 부족한 곳은 채우고, 척추 코어는 영구 보호
+    # 3. 모델 피드백 루프: 결손부는 살 찌우고, 뼈대 코어는 강제 고정
     for _ in range(iterations):
         exp = convolve(mask, opt_kernel, mode='constant', cval=0.0)
         max_e = np.max(exp) if np.max(exp) > 0 else 1.0
         printed = ((exp / max_e) >= opt_th).astype(float)
-        
-        # 오차: Target 대비 결손부(+1)는 살 붙이기
+
         error = base - printed
-        
-        # 덜 찍힌 곳(빨강)에 우선적으로 마스크 살 찌우기
         mask = np.clip(mask + 0.5 * error, 0.0, 1.0)
-        
-        # 최소 선폭 보호: 원본 패턴의 중심부는 절대 0으로 떨어지지 않게 강제 1 고정
         mask = np.maximum(mask, core_skeleton)
 
     return (mask >= 0.45).astype(float)
@@ -592,7 +622,7 @@ with ctrl_cols[0]:
 with ctrl_cols[1]:
     if st.button("⚡ 역노광 자동 OPC 실행 (ILT Loop)", type="primary"):
         with st.spinner("OPC 역보정 최적화 연산 중..."):
-            optimized_mask = run_iterative_opc(target, kernel, threshold, iterations=8)
+            optimized_mask = run_iterative_opc(target, kernel, threshold, iterations=6)
             st.session_state.current_mask = optimized_mask
             st.rerun()
 

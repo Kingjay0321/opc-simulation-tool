@@ -45,7 +45,7 @@ def get_nand2_x4():
     mask[30:48, 30:33] = 1.0
     return mask
 
-# 3. 레이아웃 로드 분기
+# 3. 레이아웃 모드별 타겟 생성
 if layout_mode == "Preset Standard Cells":
     preset_choice = st.sidebar.selectbox("Select Target Cell", ["INV_X1", "NAND2_X4"])
     target = get_inv_x1() if preset_choice == "INV_X1" else get_nand2_x4()
@@ -53,192 +53,213 @@ if layout_mode == "Preset Standard Cells":
 
 elif layout_mode == "Interactive Grid Drawing":
     st.sidebar.subheader("Canvas Grid Size")
-    grid_w = st.sidebar.number_input("Grid Width (X, columns)", min_value=5, max_value=40, value=18, step=1)
-    grid_h = st.sidebar.number_input("Grid Height (Y, rows)", min_value=5, max_value=60, value=30, step=1)
+    grid_w = st.sidebar.number_input("Grid Width (X, columns)", min_value=5, max_value=40, value=20, step=1)
+    grid_h = st.sidebar.number_input("Grid Height (Y, rows)", min_value=5, max_value=40, value=20, step=1)
 
     st.subheader("Minesweeper-Style Pixel Grid Editor")
-    st.markdown("💡 **마우스 왼쪽 버튼을 누른 채로 쓱 드래그하면 연속으로 빠르게 칠해집니다.**")
+    st.markdown("💡 **마우스 왼쪽 버튼을 누른 채로 드래그하여 배선을 그리세요. 그린 후 아래 [적용하기] 버튼을 누르면 실시간 반영됩니다.**")
 
-    # 세션 상태에 사용자 드로잉 행렬 보관
-    canvas_session_key = f"drawn_matrix_{grid_w}_{grid_h}"
-    if canvas_session_key not in st.session_state:
-        st.session_state[canvas_session_key] = [[0 for _ in range(grid_w)] for _ in range(grid_h)]
+    matrix_key = f"matrix_{grid_w}_{grid_h}"
+    if matrix_key not in st.session_state:
+        st.session_state[matrix_key] = [[0 for _ in range(grid_w)] for _ in range(grid_h)]
 
-    initial_matrix_json = json.dumps(st.session_state[canvas_session_key])
+    initial_matrix_json = json.dumps(st.session_state[matrix_key])
 
-    # HTML5/JS 드래그 픽셀 그리드 컴포넌트
-    custom_canvas_html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <style>
-        body {{
-          user-select: none;
-          font-family: monospace, sans-serif;
-          background: #f0f2f6;
-          margin: 0;
-          padding: 8px;
-        }}
-        .controls {{
-          margin-bottom: 10px;
-          display: flex;
-          gap: 10px;
-          align-items: center;
-        }}
-        .btn {{
-          padding: 6px 14px;
-          border: 2px outset #ffffff;
-          background: #d4d0c8;
-          font-weight: bold;
-          cursor: pointer;
-          border-radius: 3px;
-        }}
-        .btn:active {{
-          border-style: inset;
-        }}
-        .btn.active {{
-          background: #0044aa;
-          color: white;
-          border-style: inset;
-        }}
-        #grid-container {{
-          display: grid;
-          grid-template-columns: repeat({grid_w}, 16px);
-          grid-template-rows: repeat({grid_h}, 16px);
-          gap: 1px;
-          background-color: #808080;
-          padding: 4px;
-          border: 3px inset #c0c0c0;
-          width: fit-content;
-          max-height: 520px;
-          overflow: auto;
-        }}
-        .cell {{
-          width: 16px;
-          height: 16px;
-          background-color: #c0c0c0;
-          border-top: 1px solid #ffffff;
-          border-left: 1px solid #ffffff;
-          border-right: 1px solid #808080;
-          border-bottom: 1px solid #808080;
-          box-sizing: border-box;
-          cursor: crosshair;
-        }}
-        .cell.filled {{
-          background-color: #1a4b8c !important;
-          border: 1px solid #0d2b56 !important;
-        }}
-      </style>
-    </head>
-    <body>
-      <div class="controls">
-        <button id="drawBtn" class="btn active" onclick="setMode(1)">✏️ 배선 그리기 (1)</button>
-        <button id="eraseBtn" class="btn" onclick="setMode(0)">🧹 지우개 (0)</button>
-        <button class="btn" onclick="clearGrid()">🔄 전체 리셋</button>
-        <span style="font-size:12px; color:#555;">크기: {grid_w} × {grid_h} 칸</span>
-      </div>
-      <div id="grid-container"></div>
-      
-      <script>
-        let isDrawing = false;
-        let drawMode = 1; // 1: draw, 0: erase
-        const rows = {grid_h};
-        const cols = {grid_w};
-        let gridData = {initial_matrix_json};
+    col_canvas, col_preview = st.columns([1.2, 1])
 
-        const container = document.getElementById('grid-container');
-
-        function createGrid() {{
-          container.innerHTML = '';
-          for (let r = 0; r < rows; r++) {{
-            for (let c = 0; c < cols; c++) {{
-              const cell = document.createElement('div');
-              cell.classList.add('cell');
-              cell.dataset.r = r;
-              cell.dataset.c = c;
-              if (gridData[r] && gridData[r][c] === 1) {{
-                cell.classList.add('filled');
-              }}
-
-              cell.addEventListener('mousedown', (e) => {{
-                e.preventDefault();
-                isDrawing = true;
-                applyState(cell, r, c);
-              }});
-
-              cell.addEventListener('mouseenter', () => {{
-                if (isDrawing) {{
-                  applyState(cell, r, c);
-                }}
-              }});
-
-              container.appendChild(cell);
-            }}
-          }}
-        }}
-
-        function applyState(cell, r, c) {{
-          if (drawMode === 1) {{
-            cell.classList.add('filled');
-            gridData[r][c] = 1;
-          }} else {{
-            cell.classList.remove('filled');
-            gridData[r][c] = 0;
-          }}
-          sendDataToStreamlit();
-        }}
-
-        window.addEventListener('mouseup', () => {{
-          isDrawing = false;
-        }});
-
-        function setMode(mode) {{
-          drawMode = mode;
-          document.getElementById('drawBtn').classList.toggle('active', mode === 1);
-          document.getElementById('eraseBtn').classList.toggle('active', mode === 0);
-        }}
-
-        function clearGrid() {{
-          for (let r = 0; r < rows; r++) {{
-            for (let c = 0; c < cols; c++) {{
-              gridData[r][c] = 0;
-            }}
-          }}
-          document.querySelectorAll('.cell').forEach(el => el.classList.remove('filled'));
-          sendDataToStreamlit();
-        }}
-
-        function sendDataToStreamlit() {{
-          const strData = JSON.stringify(gridData);
-          window.parent.postMessage({{
-            type: 'streamlit:setComponentValue',
-            value: strData
-          }}, '*');
-        }}
-
-        createGrid();
-      </script>
-    </body>
-    </html>
-    """
-
-    col_canvas, col_info = st.columns([1.3, 1])
     with col_canvas:
-        drawn_json_str = components.html(custom_canvas_html, height=min(600, grid_h * 18 + 100))
+        # 실시간 데이터 브릿지를 갖춘 HTML5 그리드
+        custom_canvas_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <style>
+            body {{
+              user-select: none;
+              font-family: monospace, sans-serif;
+              background: #f0f2f6;
+              margin: 0;
+              padding: 6px;
+            }}
+            .controls {{
+              margin-bottom: 8px;
+              display: flex;
+              gap: 8px;
+              align-items: center;
+              flex-wrap: wrap;
+            }}
+            .btn {{
+              padding: 6px 12px;
+              border: 2px outset #ffffff;
+              background: #d4d0c8;
+              font-weight: bold;
+              cursor: pointer;
+              border-radius: 3px;
+              font-size: 12px;
+            }}
+            .btn:active {{
+              border-style: inset;
+            }}
+            .btn.active {{
+              background: #1a4b8c;
+              color: white;
+              border-style: inset;
+            }}
+            #grid-container {{
+              display: grid;
+              grid-template-columns: repeat({grid_w}, 16px);
+              grid-template-rows: repeat({grid_h}, 16px);
+              gap: 1px;
+              background-color: #7b7b7b;
+              padding: 4px;
+              border: 3px inset #c0c0c0;
+              width: fit-content;
+              max-height: 480px;
+              overflow: auto;
+            }}
+            .cell {{
+              width: 16px;
+              height: 16px;
+              background-color: #c0c0c0;
+              border-top: 1px solid #ffffff;
+              border-left: 1px solid #ffffff;
+              border-right: 1px solid #808080;
+              border-bottom: 1px solid #808080;
+              box-sizing: border-box;
+              cursor: crosshair;
+            }}
+            .cell.filled {{
+              background-color: #1a4b8c !important;
+              border: 1px solid #0d2b56 !important;
+            }}
+          </style>
+        </head>
+        <body>
+          <div class="controls">
+            <button id="drawBtn" class="btn active" onclick="setMode(1)">✏️ 배선 그리기 (1)</button>
+            <button id="eraseBtn" class="btn" onclick="setMode(0)">🧹 지우개 (0)</button>
+            <button class="btn" onclick="clearGrid()">🔄 리셋</button>
+            <span style="font-size:11px; color:#555;">크기: {grid_w} × {grid_h}</span>
+          </div>
+          <div id="grid-container"></div>
+          
+          <script>
+            let isDrawing = false;
+            let drawMode = 1;
+            const rows = {grid_h};
+            const cols = {grid_w};
+            let gridData = {initial_matrix_json};
+            const container = document.getElementById('grid-container');
 
-    # 사용자 편집 데이터 수신
-    if drawn_json_str:
+            function createGrid() {{
+              container.innerHTML = '';
+              for (let r = 0; r < rows; r++) {{
+                for (let c = 0; c < cols; c++) {{
+                  const cell = document.createElement('div');
+                  cell.classList.add('cell');
+                  cell.id = `cell_${{r}}_${{c}}`;
+                  if (gridData[r] && gridData[r][c] === 1) {{
+                    cell.classList.add('filled');
+                  }}
+
+                  cell.addEventListener('mousedown', (e) => {{
+                    e.preventDefault();
+                    isDrawing = true;
+                    applyState(cell, r, c);
+                  }});
+
+                  cell.addEventListener('mouseenter', () => {{
+                    if (isDrawing) {{
+                      applyState(cell, r, c);
+                    }}
+                  }});
+
+                  container.appendChild(cell);
+                }}
+              }}
+            }}
+
+            function applyState(cell, r, c) {{
+              if (drawMode === 1) {{
+                cell.classList.add('filled');
+                gridData[r][c] = 1;
+              }} else {{
+                cell.classList.remove('filled');
+                gridData[r][c] = 0;
+              }}
+              syncToStreamlit();
+            }}
+
+            window.addEventListener('mouseup', () => {{
+              isDrawing = false;
+            }});
+
+            function setMode(mode) {{
+              drawMode = mode;
+              document.getElementById('drawBtn').classList.toggle('active', mode === 1);
+              document.getElementById('eraseBtn').classList.toggle('active', mode === 0);
+            }}
+
+            function clearGrid() {{
+              for (let r = 0; r < rows; r++) {{
+                for (let c = 0; c < cols; c++) {{
+                  gridData[r][c] = 0;
+                }}
+              }}
+              document.querySelectorAll('.cell').forEach(el => el.classList.remove('filled'));
+              syncToStreamlit();
+            }}
+
+            function syncToStreamlit() {{
+              try {{
+                const jsonStr = JSON.stringify(gridData);
+                // 부모 Streamlit의 숨겨진 textarea 요소와 동기화
+                const inputs = window.parent.document.querySelectorAll('textarea');
+                for (let input of inputs) {{
+                  if (input.getAttribute('aria-label') === 'grid_data_bridge') {{
+                    input.value = jsonStr;
+                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    break;
+                  }}
+                }}
+              }} catch (err) {{}}
+            }}
+
+            createGrid();
+          </script>
+        </body>
+        </html>
+        """
+        components.html(custom_canvas_html, height=min(530, grid_h * 18 + 80))
+
+        # 브릿지 수신용 컨트롤러
+        bridge_val = st.text_area(
+            "grid_data_bridge",
+            value=json.dumps(st.session_state[matrix_key]),
+            label_visibility="collapsed",
+            key=f"bridge_{grid_w}_{grid_h}"
+        )
+
+        c_sync1, c_sync2 = st.columns([1.5, 1])
+        with c_sync1:
+            if st.button("💾 그린 패턴 시뮬레이션에 적용하기 (Apply)", type="primary"):
+                try:
+                    parsed = json.loads(bridge_val)
+                    st.session_state[matrix_key] = parsed
+                    st.rerun()
+                except Exception:
+                    pass
+
         try:
-            parsed_matrix = json.loads(drawn_json_str)
-            if len(parsed_matrix) == grid_h and len(parsed_matrix[0]) == grid_w:
-                st.session_state[canvas_session_key] = parsed_matrix
+            st.session_state[matrix_key] = json.loads(bridge_val)
         except Exception:
             pass
 
-    target = np.array(st.session_state[canvas_session_key], dtype=float)
+    target = np.array(st.session_state[matrix_key], dtype=float)
     layout_name = f"Custom_{grid_w}x{grid_h}"
 
-    with col_info:
+    with col_preview:
         st.markdown("**실시간 패턴 프리뷰 (A)**")
         fig_prev, ax_prev = plt.subplots(figsize=(4.5, 4.5 * (grid_h / grid_w)))
         ax_prev.imshow(target, cmap='Blues', origin='upper', interpolation='nearest',
@@ -261,7 +282,7 @@ else:
         target[10:20, 10:20] = 1.0
     layout_name = "Uploaded_CSV"
 
-# 세션 상태 관리 (마스크 동기화)
+# 4. 세션 상태 관리 (마스크 싱크)
 if "current_mask" not in st.session_state or st.session_state.get("last_layout") != layout_name:
     st.session_state.current_mask = target.copy()
     st.session_state.last_layout = layout_name
@@ -269,7 +290,7 @@ if "current_mask" not in st.session_state or st.session_state.get("last_layout")
 if st.session_state.current_mask.shape != target.shape:
     st.session_state.current_mask = target.copy()
 
-# 광학 파라미터 제어
+# 5. 광학 파라미터 제어
 st.sidebar.subheader("Optical Lithography Parameters")
 kernel_type = st.sidebar.radio("Optical Blur Kernel", ["Standard 5x5 Matrix", "2D Gaussian Function"])
 sigma = st.sidebar.slider("Gaussian Diffusion Radius (sigma, px)", 1.0, 3.0, 1.8, 0.1)
@@ -316,7 +337,7 @@ c_m1.metric("Grid Dimension", f"{w_px} × {h_px} px")
 c_m2.metric("Physical Size", f"{w_px * unit_scale:.1f} × {h_px * unit_scale:.1f} nm")
 c_m3.metric("Pattern Fidelity (IoU)", f"{iou:.2f}%", delta=f"{error_pixels} px Error", delta_color="inverse")
 
-# 4. 하단 4개 플롯 동적 배치
+# 6. 하단 4개 플롯 최적 동적 배치
 def generate_analysis_plot():
     is_tall = aspect_ratio >= 1.4
     if is_tall:
@@ -364,7 +385,7 @@ st.subheader("Lithography & OPC Analysis Result")
 fig_result = generate_analysis_plot()
 st.pyplot(fig_result)
 
-# 5. 마스크 제어 및 내보내기
+# 7. 마스크 제어 및 내보내기 파트
 st.subheader("OPC Modification & Export")
 ctrl_cols = st.columns(5 if layout_mode == "Interactive Grid Drawing" else 4)
 

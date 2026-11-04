@@ -486,10 +486,46 @@ with ctrl_cols[0]:
         st.rerun()
 
 with ctrl_cols[1]:
-    if st.button("Apply Quick Bias/OPC"):
-        from scipy.ndimage import binary_dilation
-        dilated = binary_dilation(target, iterations=1)
-        st.session_state.current_mask = np.where(target == 1, target, (dilated.astype(float) * 0.5))
+    if st.button("Apply Advanced OPC (Serif & Line Extension)", type="primary"):
+        # 오른쪽 도면과 동일한 Serif / Anti-serif / Hammerhead 알고리즘 적용
+        from scipy.ndimage import convolve
+        
+        base_mask = target.copy()
+        h, w = base_mask.shape
+        opc_mask = base_mask.copy()
+        
+        # 3x3 이웃 탐색 커널을 통해 볼록 코너(Outer Corner)와 선 끝(Line End) 검출
+        corner_kernel = np.array([
+            [1, 1, 1],
+            [1, 9, 1],
+            [1, 1, 1]
+        ])
+        neighbor_count = convolve(base_mask, corner_kernel, mode='constant', cval=0.0)
+        
+        for r in range(h):
+            for c in range(w):
+                # 1. 선 끝단 및 볼록 모서리 확장 (Outer Serif & Hammerhead: 패턴 살찌우기)
+                if base_mask[r, c] == 0:
+                    # 패턴 바로 바깥 대각선 모서리에 인접한 경우 세리프(귀) 추가
+                    up = base_mask[r-1, c] if r > 0 else 0
+                    down = base_mask[r+1, c] if r < h-1 else 0
+                    left = base_mask[r, c-1] if c > 0 else 0
+                    right = base_mask[r, c+1] if c < w-1 else 0
+                    
+                    # 수평/수직 이웃의 합이 모서리 형태를 띨 때 1픽셀 세리프 돌기 부착
+                    if (up + left == 2) or (up + right == 2) or (down + left == 2) or (down + right == 2):
+                        opc_mask[r, c] = 1.0
+                
+                # 2. 선 끝 수축 방지 (Line-End Extension)
+                if base_mask[r, c] == 1:
+                    # 끝단(세로 또는 가로 끝)이면 1픽셀 연장
+                    if r > 0 and r < h-1:
+                        if base_mask[r-1, c] == 0 and base_mask[r+1, c] == 1 and (r > 1 and base_mask[r-2, c] == 0):
+                            opc_mask[r-1, c] = 1.0
+                        if base_mask[r+1, c] == 0 and base_mask[r-1, c] == 1 and (r < h-2 and base_mask[r+2, c] == 0):
+                            opc_mask[r+1, c] = 1.0
+
+        st.session_state.current_mask = opc_mask
         st.rerun()
 
 with ctrl_cols[2]:

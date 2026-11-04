@@ -136,11 +136,10 @@ axes[3].set_title("(d) Superposition Analysis\n(Green: 일치 / Red: 결손 / Bl
 for ax in axes:
     ax.set_xlabel("X (nm)", fontsize=11)
     ax.set_ylabel("Y (nm)", fontsize=11)
-    ax.xaxis.set_major_locator(MultipleLocator(21.0))   # 6칸(21nm) 단위 주요 눈금
-    ax.yaxis.set_major_locator(MultipleLocator(31.5))   # 9칸(31.5nm) 단위 주요 눈금
+    ax.xaxis.set_major_locator(MultipleLocator(21.0))
+    ax.yaxis.set_major_locator(MultipleLocator(31.5))
     
     if show_grid:
-        # 1 픽셀(3.5nm) 단위 서브 격자선
         ax.xaxis.set_minor_locator(MultipleLocator(unit_scale))
         ax.yaxis.set_minor_locator(MultipleLocator(unit_scale))
         ax.grid(which='minor', color='gray', linestyle=':', linewidth=0.5, alpha=0.6)
@@ -152,4 +151,25 @@ st.pyplot(fig)
 st.subheader("마스크 형태 보정 (OPC 조작)")
 c1, c2, c3 = st.columns(3)
 with c1:
-    if st.button("마스크 초기화 (Target과
+    if st.button("마스크 초기화 (Target과 동일하게)"):
+        st.session_state.current_mask = target.copy()
+        st.rerun()
+
+with c2:
+    if st.button("자동 간단 OPC 적용 (Serif & Line Extension)"):
+        from scipy.ndimage import binary_dilation
+        corrected = binary_dilation(target, iterations=1).astype(float)
+        st.session_state.current_mask = corrected
+        st.rerun()
+
+with c3:
+    csv_buffer = io.StringIO()
+    np.savetxt(csv_buffer, st.session_state.current_mask, delimiter=",", fmt="%.1f")
+    csv_data = csv_buffer.getvalue()
+    
+    st.download_button(
+        label="현재 마스크 배열 다운로드 (CSV)",
+        data=csv_data,
+        file_name=f"{layout_choice}_mask.csv",
+        mime="text/csv"
+    )

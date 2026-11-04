@@ -689,4 +689,19 @@ if layout_mode == "Interactive Grid Drawing":
         st.download_button(
             label="📥 그린 타겟 다운로드 (CSV)",
             data=drawn_csv_buf.getvalue(),
-            file_name=f"{
+            file_name=f"{layout_name}_target.csv",
+            mime="text/csv"
+        )
+    btn_col_idx = 4
+else:
+    btn_col_idx = 3
+
+with ctrl_cols[btn_col_idx]:
+    img_buf = io.BytesIO()
+    fig_result.savefig(img_buf, format='png', dpi=300, bbox_inches='tight')
+    st.download_button(
+        label="📊 전·후 종합 비교 분석 플롯 (PNG)",
+        data=img_buf.getvalue(),
+        file_name=f"{layout_name}_0p875nm_subgrid_analysis.png",
+        mime="image/png"
+    )

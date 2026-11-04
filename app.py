@@ -366,19 +366,18 @@ def draw_dimension_arrows(ax):
     if not show_dimension:
         return
 
-    # 공통 화살표 스타일
     arrow_style = dict(arrowstyle='<->', color='#1a4b8c', lw=1.2)
     font_style = dict(color='#1a4b8c', fontsize=9, fontweight='bold', ha='center', va='bottom')
 
     if layout_name == "INV_X1":
         # 상단 전체 가로폭: 63 nm (18λ)
         ax.annotate('', xy=(0, -8), xytext=(63, -8), arrowprops=arrow_style, annotation_clip=False)
-        ax.text(31.5, -10, '63 nm (18λ)', font_style, annotation_clip=False)
+        ax.text(31.5, -10, '63 nm (18λ)', **font_style, annotation_clip=False)
 
         # 우측 전체 높이: 189 nm (54λ)
         ax.annotate('', xy=(68, 0), xytext=(68, 189),
                     arrowprops=dict(arrowstyle='<->', color='#1a4b8c', lw=1.2), annotation_clip=False)
-        ax.text(70, 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=9, fontweight='bold',
+        ax.text(71, 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=9, fontweight='bold',
                 ha='left', va='center', rotation=-90, annotation_clip=False)
 
         # 우측 중앙 세로선 길이: 63 nm*
@@ -387,33 +386,36 @@ def draw_dimension_arrows(ax):
 
         # 세로선 간격: 21 nm*
         ax.annotate('', xy=(21, 136), xytext=(42, 136), arrowprops=arrow_style)
-        ax.text(31.5, 134, '21 nm*', font_style)
+        ax.text(31.5, 134, '21 nm*', **font_style)
 
     elif layout_name == "NAND2_X4":
         # 상단 전체 가로폭: 157.5 nm (45λ)
         ax.annotate('', xy=(0, -8), xytext=(157.5, -8), arrowprops=arrow_style, annotation_clip=False)
-        ax.text(78.75, -10, '157.5 nm (45λ)', font_style, annotation_clip=False)
+        ax.text(78.75, -10, '157.5 nm (45λ)', **font_style, annotation_clip=False)
 
         # 우측 전체 높이: 189 nm (54λ)
-        ax.annotate('', xy=(163, 0), xytext=(163, 189),
+        ax.annotate('', xy=(164, 0), xytext=(164, 189),
                     arrowprops=dict(arrowstyle='<->', color='#1a4b8c', lw=1.2), annotation_clip=False)
-        ax.text(165, 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=9, fontweight='bold',
+        ax.text(167, 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=9, fontweight='bold',
                 ha='left', va='center', rotation=-90, annotation_clip=False)
 
         # 하단 핀 간격: 31.5 nm*
         ax.annotate('', xy=(10.5, 172), xytext=(42, 172), arrowprops=arrow_style)
-        ax.text(26.25, 170, '31.5 nm*', font_style)
+        ax.text(26.25, 170, '31.5 nm*', **font_style)
 
     else:
         # 사용자 정의(Custom): 전체 폭과 높이 자동 표기
-        ax.annotate('', xy=(0, -6), xytext=(width_nm, -6), arrowprops=arrow_style, annotation_clip=False)
-        ax.text(width_nm / 2, -8, f'{width_nm:.1f} nm ({w_px}λ)', font_style, annotation_clip=False)
+        offset_top = max(6.0, height_nm * 0.05)
+        offset_right = max(6.0, width_nm * 0.05)
 
-        ax.annotate('', xy=(width_nm + 5, 0), xytext=(width_nm + 5, height_nm),
+        ax.annotate('', xy=(0, -offset_top), xytext=(width_nm, -offset_top), arrowprops=arrow_style, annotation_clip=False)
+        ax.text(width_nm / 2.0, -(offset_top + 2.0), f'{width_nm:.1f} nm ({w_px}λ)', **font_style, annotation_clip=False)
+
+        ax.annotate('', xy=(width_nm + offset_right, 0), xytext=(width_nm + offset_right, height_nm),
                     arrowprops=dict(arrowstyle='<->', color='#1a4b8c', lw=1.2), annotation_clip=False)
-        ax.text(width_nm + 7, height_nm / 2, f'{height_nm:.1f} nm ({h_px}λ)',
+        ax.text(width_nm + offset_right + 2.0, height_nm / 2.0, f'{height_nm:.1f} nm ({h_px}λ)',
                 color='#1a4b8c', fontsize=9, fontweight='bold', ha='left', va='center', rotation=-90, annotation_clip=False)
-
+        
 # 8. 하단 4개 플롯 최적 동적 배치 (B, C 완전 가시화)
 def generate_analysis_plot():
     is_tall = aspect_ratio >= 1.4

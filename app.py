@@ -429,18 +429,30 @@ norm_exp_after = exp_after / max_ea
 printed_after = (norm_exp_after >= threshold).astype(float)
 stats_a = evaluate_context_aware_yield(target_sub, printed_after)
 
-dfm_delta = stats_a["dfm_yield"] - stats_b["dfm_yield"]
 iou_delta = stats_a["strict_iou"] - stats_b["strict_iou"]
+dfm_delta = stats_a["dfm_yield"] - stats_b["dfm_yield"]
 open_saved = stats_b["crit_open"] - stats_a["crit_open"]
-short_saved = stats_b["crit_short"] - stats_a["crit_short"]
+short_added = stats_a["crit_short"] - stats_b["crit_short"]
 
-# 9. 메트릭 대시보드
-st.subheader("Quantitative DFM Evaluation (0.875 nm Sub-grid OPC Performance)")
-m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-m_col1.metric("Target Physical Size", f"{w_core_nm:.1f} × {h_core_nm:.1f} nm", f"{raw_target.shape[1]}×{raw_target.shape[0]} Grids (Sub-grid: 0.875nm)")
-m_col2.metric("Before OPC (DFM 실효 수율)", f"{stats_b['dfm_yield']:.1f}%", f"IoU: {stats_b['strict_iou']:.1f}% (단선 {stats_b['crit_open']}px)", delta_color="off")
-m_col3.metric("After OPC (DFM 실효 수율)", f"{stats_a['dfm_yield']:.1f}%", f"{dfm_delta:+.1f}% p 향상 (IoU {stats_a['strict_iou']:.1f}%)", delta_color="normal")
-m_col4.metric("치명 결함(단선/쇼트) 구출", f"{open_saved + short_saved} px 제거", f"잔여 치명결함: {stats_a['crit_open'] + stats_a['crit_short']} px", delta_color="normal")
+# 9. 메트릭 대시보드 (IoU & DFM 듀얼 동등 메인 위상 배치)
+st.subheader("Quantitative Evaluation (Dual Primary Metrics: Geometric IoU & DFM Yield)")
+
+# 2개의 메인 카드 컬럼 그룹 분할
+m_row1_col1, m_row1_col2 = st.columns(2)
+
+with m_row1_col1:
+    st.markdown("#### 📐 Metric 1: Geometric Fidelity (기하학적 일치도)")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Target Physical Size", f"{w_core_nm:.1f} × {h_core_nm:.1f} nm", f"{raw_target.shape[1]}×{raw_target.shape[0]} Grids")
+    c2.metric("Before OPC (Strict IoU)", f"{stats_b['strict_iou']:.1f}%", f"Error: {stats_b['total_error']} px", delta_color="off")
+    c3.metric("After OPC (Strict IoU)", f"{stats_a['strict_iou']:.1f}%", f"{iou_delta:+.1f}% p 개선", delta_color="normal")
+
+with m_row1_col2:
+    st.markdown("#### ⚡ Metric 2: Semiconductor DFM Yield (공정 신뢰성 실효 수율)")
+    d1, d2, d3 = st.columns(3)
+    d1.metric("치명적 단선(Open) 결함", f"{stats_a['crit_open']} px", f"{open_saved:+} px 구출 (위험 제로)", delta_color="normal")
+    d2.metric("Before OPC (DFM 수율)", f"{stats_b['dfm_yield']:.1f}%", f"쇼트위험: {stats_b['crit_short']} px", delta_color="off")
+    d3.metric("After OPC (DFM 수율)", f"{stats_a['dfm_yield']:.1f}%", f"{dfm_delta:+.1f}% p (쇼트 +{short_added}px)", delta_color="inverse")
 
 # 10. CAD 치수 화살표
 def draw_dimension_arrows(ax):
@@ -480,12 +492,10 @@ def overlay_target_outline(ax):
     ax.contour(target_sub, levels=[0.5], colors=['#ffffff'], linestyles=['--'], linewidths=[1.4],
                extent=[0, total_w_nm, total_h_nm, 0], origin='upper')
 
-# 12. 전/후 종합 비교 분석 플롯 (간격 대폭 압축 & 파라미터 박스 우측 정렬)
+# 12. 전/후 종합 비교 분석 플롯
 def generate_comprehensive_plot():
-    # 상하 간격을 좁혀 한눈에 들어오도록 피규어 높이 최적화
     fig = plt.figure(figsize=(22.5, 14.5), facecolor='#ffffff')
 
-    # GridSpec 2단 구조로 직접 압축 배치
     gs = fig.add_gridspec(
         2, 4,
         height_ratios=[1.0, 1.0],
@@ -520,22 +530,19 @@ def generate_comprehensive_plot():
     diff_before[(target_sub == 1) & (printed_before == 0)] = [0.95, 0.1, 0.1]
     diff_before[(target_sub == 0) & (printed_before == 1)] = [0.1, 0.4, 0.95]
     ax_top[3].imshow(diff_before, origin='upper', extent=extent_nm, interpolation='nearest')
-    ax_top[3].set_title(f"(D-1) Superposition (Before)\nDFM Yield: {stats_b['dfm_yield']:.1f}% (IoU {stats_b['strict_iou']:.1f}%)", fontsize=10.5, fontweight='bold', pad=10)
+    ax_top[3].set_title(f"(D-1) Superposition (Before)\nStrict IoU: {stats_b['strict_iou']:.1f}% | DFM: {stats_b['dfm_yield']:.1f}%", fontsize=10.5, fontweight='bold', pad=10)
     overlay_target_outline(ax_top[3])
 
     # ------------------ 가운데 영역: 좌측 제목 & 우측 파라미터 박스 ------------------
-    # 왼쪽 제목
     fig.text(0.06, 0.485, "SECTION 2: AFTER OPC (0.875nm Fine-Tuned Sub-grid OPC Optimization)",
              fontsize=13, fontweight='heavy', color='#1b5e20', ha='left', va='center')
 
-    # 오른쪽 파라미터 요약 카드 (가운데 오른쪽 정렬)
     summary_text = (
         f"[SUB-GRID] Target: {target_unit_nm}nm | Mask: {mask_unit_nm:.3f}nm | 4x Reticle: {reticle_feature_nm:.1f}nm  |  "
         f"PSF: σ={sigma_nm:.1f}nm, I_th={threshold:.2f}\n"
-        f"[PERFORMANCE] DFM Yield: {stats_b['dfm_yield']:.1f}% ──▶ {stats_a['dfm_yield']:.1f}% ({dfm_delta:+.1f}%p)  |  "
-        f"Strict IoU: {stats_b['strict_iou']:.1f}% ──▶ {stats_a['strict_iou']:.1f}%\n"
-        f"[CRITICAL DEFECT] Fatal Opens: {stats_b['crit_open']}px ──▶ {stats_a['crit_open']}px ({open_saved:+}px Saved)  |  "
-        f"Short Hazards: {stats_b['crit_short']}px ──▶ {stats_a['crit_short']}px"
+        f"[PRIMARY 1: GEOMETRIC IoU] Strict IoU: {stats_b['strict_iou']:.1f}% ──▶ {stats_a['strict_iou']:.1f}% ({iou_delta:+.1f}%p Improved)\n"
+        f"[PRIMARY 2: DFM RELIABILITY] DFM Yield: {stats_b['dfm_yield']:.1f}% ──▶ {stats_a['dfm_yield']:.1f}% ({dfm_delta:+.1f}%p) | "
+        f"Opens: {stats_a['crit_open']}px | Short Hazards: +{short_added}px"
     )
 
     fig.text(
@@ -571,7 +578,7 @@ def generate_comprehensive_plot():
     diff_after[(target_sub == 1) & (printed_after == 0)] = [0.95, 0.1, 0.1]
     diff_after[(target_sub == 0) & (printed_after == 1)] = [0.1, 0.4, 0.95]
     ax_bot[3].imshow(diff_after, origin='upper', extent=extent_nm, interpolation='nearest')
-    ax_bot[3].set_title(f"(D-2) Superposition (After)\nDFM Yield: {stats_a['dfm_yield']:.1f}% (IoU {stats_a['strict_iou']:.1f}%)", fontsize=10.5, fontweight='bold', pad=10)
+    ax_bot[3].set_title(f"(D-2) Superposition (After)\nStrict IoU: {stats_a['strict_iou']:.1f}% | DFM: {stats_a['dfm_yield']:.1f}%", fontsize=10.5, fontweight='bold', pad=10)
     overlay_target_outline(ax_bot[3])
 
     for ax in ax_top + ax_bot:

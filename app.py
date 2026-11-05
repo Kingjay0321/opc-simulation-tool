@@ -437,7 +437,6 @@ short_added = stats_a["crit_short"] - stats_b["crit_short"]
 # 9. 메트릭 대시보드 (IoU & DFM 듀얼 동등 메인 위상 배치)
 st.subheader("Quantitative Evaluation (Dual Primary Metrics: Geometric IoU & DFM Yield)")
 
-# 2개의 메인 카드 컬럼 그룹 분할
 m_row1_col1, m_row1_col2 = st.columns(2)
 
 with m_row1_col1:
@@ -599,7 +598,7 @@ st.subheader("Lithography & OPC Comprehensive Verification")
 fig_result = generate_comprehensive_plot()
 st.pyplot(fig_result)
 
-# 13. 0.875 nm 서브그리드 전용 정밀 ILT & 대칭 세리프 최적화 엔진
+# 13. 전방위 4방향 선 끝 & 적응형 ILT 서브그리드 최적화 엔진
 def run_subgrid_opc(target_mat_sub, opt_kernel, opt_th, iterations=8):
     h, w = target_mat_sub.shape
     base = target_mat_sub.copy()
@@ -609,27 +608,38 @@ def run_subgrid_opc(target_mat_sub, opt_kernel, opt_th, iterations=8):
 
     space_to_wire_nm = distance_transform_edt(base == 0) * mask_unit_nm
 
-    # 0.875 nm 서브픽셀 단위 미세 돌출
+    # 1. 기하학적 미세 세리프 및 전방위(상/하/좌/우) 선 끝단 정밀 연장
     pad = np.pad(base, 3, mode='constant', constant_values=0)
     for r in range(h):
         for c in range(w):
             center = pad[r+3, c+3]
             if center == 0:
-                if space_to_wire_nm[r, c] > 7.0:
+                # 쇼트 위험 없는 외곽 빈 공간(>5nm)에만 정밀 세리프 부착
+                if space_to_wire_nm[r, c] > 5.0:
                     corner_window = pad[r:r+7, c:c+7]
-                    if np.sum(corner_window) >= 24:
+                    # 코너 조건 완화: 7x7 중 14개 이상 차있으면 외곽 모서리로 감지
+                    if np.sum(corner_window) >= 14:
                         mask[r, c] = 1.0
             elif center == 1:
                 up, down = pad[r+2, c+3], pad[r+4, c+3]
-                if (up == 0 and down == 1) or (up == 1 and down == 0):
-                    if r > 2 and pad[r+2, c+3] == 0:
-                        mask[max(0, r-3):r+1, c] = 1.0
-                    if r < h - 3 and pad[r+4, c+3] == 0:
-                        mask[r:min(h, r+4), c] = 1.0
+                left, right = pad[r+3, c+2], pad[r+3, c+4]
+
+                # (1) 수직 방향 선 끝단 (상/하) 연장 (3 sub-pixels ≈ 2.6 nm)
+                if up == 0 and down == 1 and r > 2:
+                    mask[max(0, r-3):r+1, c] = 1.0
+                if up == 1 and down == 0 and r < h - 3:
+                    mask[r:min(h, r+4), c] = 1.0
+
+                # (2) 수평 방향 선 끝단 (좌/우) 연장 (3 sub-pixels ≈ 2.6 nm)
+                if left == 0 and right == 1 and c > 2:
+                    mask[r, max(0, c-3):c+1] = 1.0
+                if left == 1 and right == 0 and c < w - 3:
+                    mask[r, c:min(w, c+4)] = 1.0
 
     if is_symmetric:
         mask = np.maximum(mask, np.fliplr(mask))
 
+    # 2. 적응형 역노광 최적화(ILT) 루프 (캔버스 크기 무관 국소 결손 복원)
     k_diff = int(round(sigma_px * 1.5)) | 1
     ax_d = np.linspace(-(k_diff // 2), k_diff // 2, k_diff)
     xd, yd = np.meshgrid(ax_d, ax_d)
@@ -638,7 +648,7 @@ def run_subgrid_opc(target_mat_sub, opt_kernel, opt_th, iterations=8):
 
     cont_mask = mask.copy()
     for _ in range(iterations):
-        bin_m = (cont_mask >= 0.48).astype(float)
+        bin_m = (cont_mask >= 0.40).astype(float)
         exp = convolve(bin_m, opt_kernel, mode='constant', cval=0.0)
         max_e = np.max(exp) if np.max(exp) > 0 else 1.0
         printed = ((exp / max_e) >= opt_th).astype(float)
@@ -646,14 +656,16 @@ def run_subgrid_opc(target_mat_sub, opt_kernel, opt_th, iterations=8):
         error = base - printed
         grad = convolve(error, diff_kernel, mode='constant', cval=0.0)
 
-        cont_mask += 0.40 * grad
+        # 국소 오차 그래디언트 부스팅: 언더(결손)가 있는 영역을 강하게 보상
+        cont_mask += 0.65 * grad
         cont_mask = np.clip(cont_mask, 0.0, 1.0)
-        cont_mask = np.maximum(cont_mask, base)
+        cont_mask = np.maximum(cont_mask, base)  # 원본 골격 훼손 방지
 
         if is_symmetric:
             cont_mask = 0.5 * (cont_mask + np.fliplr(cont_mask))
 
-    final_mask = (cont_mask >= 0.48).astype(float)
+    # 최종 이진화 마스크 추출 (유효 세리프 보존)
+    final_mask = (cont_mask >= 0.38).astype(float)
     if is_symmetric:
         final_mask = np.maximum(final_mask, np.fliplr(final_mask))
 

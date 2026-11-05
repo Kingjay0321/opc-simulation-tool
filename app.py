@@ -3,7 +3,14 @@ import streamlit.components.v1 as components
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
-from scipy.ndimage import convolve, distance_transform_edt, generate_binary_structure, binary_erosion
+from scipy.ndimage import (
+    convolve,
+    gaussian_filter,
+    distance_transform_edt,
+    generate_binary_structure,
+    binary_erosion,
+    binary_dilation
+)
 import json
 import io
 import os
@@ -18,23 +25,25 @@ subgrid_ratio = 4              # 4분할 서브그리드 (1 grid = 4 sub-pixels)
 mask_unit_nm = target_unit_nm / subgrid_ratio  # 0.875 nm
 reticle_mag = 4.0              # 4:1 축소 노광계
 reticle_feature_nm = mask_unit_nm * reticle_mag # 3.5 nm 실물 마스크 E-beam 피처
-pad_grids = 3                  # 타겟 기준 외곽 패딩 (3 그리드 = 10.5 nm)
+pad_grids = 3                  # 외곽 패딩
 
 # 1. 사이드바 설정
 st.sidebar.header("Simulation Settings")
 layout_mode = st.sidebar.radio("Layout Input Mode", ["Preset Standard Cells", "Interactive Grid Drawing", "CSV File Upload"])
 process_mode = st.sidebar.radio("Process Mode", ["Standard 7nm Process Preset", "Custom Tuning Mode"])
 
-# 2. 레이아웃 데이터 함수 (3.5 nm 원본 그리드)
+# 2. 레이아웃 데이터 함수
+@st.cache_data
 def get_inv_x1_raw():
     mask = np.zeros((54, 18), dtype=float)
-    mask[0:3, 0:18] = 1.0     # 상단 바 (y: 0~10.5 nm)
-    mask[51:54, 0:18] = 1.0   # 하단 바 (y: 178.5~189 nm)
-    mask[3:21, 3:6] = 1.0    # 좌상단 세로선
-    mask[33:51, 3:6] = 1.0   # 좌하단 세로선
-    mask[18:36, 12:15] = 1.0 # 우측 중앙 세로선
+    mask[0:3, 0:18] = 1.0
+    mask[51:54, 0:18] = 1.0
+    mask[3:21, 3:6] = 1.0
+    mask[33:51, 3:6] = 1.0
+    mask[18:36, 12:15] = 1.0
     return mask
 
+@st.cache_data
 def get_nand2_x4_raw():
     mask = np.zeros((54, 45), dtype=float)
     mask[0:3, 0:45] = 1.0
@@ -339,7 +348,7 @@ h_grids, w_grids = padded_target.shape
 total_w_nm = w_grids * target_unit_nm
 total_h_nm = h_grids * target_unit_nm
 
-# 각 3.5nm 그리드를 4x4의 0.875nm 서브픽셀로 정수 복제
+# 각 3.5nm 그리드를 4x4 서브픽셀(0.875nm)로 정수 복제
 target_sub = np.repeat(np.repeat(padded_target, subgrid_ratio, axis=0), subgrid_ratio, axis=1)
 
 extent_nm = [0, total_w_nm, total_h_nm, 0]
@@ -358,13 +367,11 @@ if st.session_state.current_mask_sub.shape != target_sub.shape:
 
 # 6. 광학 파라미터
 if process_mode == "Standard 7nm Process Preset":
-    st.sidebar.markdown("✅ **표준 7nm 공정 (정수 4분할 서브그리드 모드)**")
-    kernel_type = "2D Gaussian Function"
+    st.sidebar.markdown("✅ **표준 7nm 공정 (정수 4분할 고속 서브그리드 모드)**")
     sigma_nm = 6.5
     threshold = 0.50
 else:
     st.sidebar.subheader("Optical Lithography Parameters")
-    kernel_type = st.sidebar.radio("Optical Blur Kernel", ["2D Gaussian Function", "Standard 5x5 Matrix"])
     sigma_nm = st.sidebar.slider("Optical Blur Radius (sigma, nm)", 3.0, 12.0, 6.5, 0.5)
     threshold = st.sidebar.slider("Resist Threshold (I_th)", 0.20, 0.80, 0.50, 0.01)
 
@@ -373,15 +380,10 @@ show_grid = st.sidebar.checkbox("Display Unit Grid (3.5 nm Design Pitch)", value
 show_dimension = st.sidebar.checkbox("Display CAD Dimension Arrows", value=True)
 show_outline = st.sidebar.checkbox("Display Target Outline (White Dashed)", value=True)
 
-# 0.875 nm 서브픽셀 단위 가우시안 커널
+# 0.875 nm 서브픽셀 단위 표준편차
 sigma_px = sigma_nm / mask_unit_nm
-k_radius = int(round(sigma_px * 3.5)) | 1
-ax_k = np.linspace(-(k_radius // 2), k_radius // 2, k_radius)
-xx, yy = np.meshgrid(ax_k, ax_k)
-opt_kernel_sub = np.exp(-(xx**2 + yy**2) / (2.0 * sigma_px**2))
-opt_kernel_sub = opt_kernel_sub / np.sum(opt_kernel_sub)
 
-# 7. DFM 실효 수율 평가 함수
+# 7. 고속 DFM 실효 수율 평가 함수
 def evaluate_context_aware_yield(target_mat, printed_mat):
     inter = np.logical_and(target_mat == 1, printed_mat == 1).sum()
     union = np.logical_or(target_mat == 1, printed_mat == 1).sum()
@@ -422,16 +424,17 @@ def evaluate_context_aware_yield(target_mat, printed_mat):
     }
     return stats
 
-# 8. 전/후 연산
-exp_before = convolve(target_sub, opt_kernel_sub, mode='constant', cval=0.0)
-max_eb = np.max(exp_before) if np.max(exp_before) > 0 else 1.0
-norm_exp_before = exp_before / max_eb
+# 8. 고속 광학 결상 연산 (1D Separable Gaussian Filter 적용)
+def simulate_aerial_image(mask_mat, sigma):
+    exp = gaussian_filter(mask_mat, sigma=sigma, mode='constant', cval=0.0)
+    max_e = np.max(exp) if np.max(exp) > 0 else 1.0
+    return exp / max_e
+
+norm_exp_before = simulate_aerial_image(target_sub, sigma_px)
 printed_before = (norm_exp_before >= threshold).astype(float)
 stats_b = evaluate_context_aware_yield(target_sub, printed_before)
 
-exp_after = convolve(st.session_state.current_mask_sub, opt_kernel_sub, mode='constant', cval=0.0)
-max_ea = np.max(exp_after) if np.max(exp_after) > 0 else 1.0
-norm_exp_after = exp_after / max_ea
+norm_exp_after = simulate_aerial_image(st.session_state.current_mask_sub, sigma_px)
 printed_after = (norm_exp_after >= threshold).astype(float)
 stats_a = evaluate_context_aware_yield(target_sub, printed_after)
 
@@ -442,7 +445,6 @@ short_added = stats_a["crit_short"] - stats_b["crit_short"]
 
 # 9. 메트릭 대시보드
 st.subheader("Quantitative Evaluation (Dual Primary Metrics: Geometric IoU & DFM Yield)")
-
 m_row1_col1, m_row1_col2 = st.columns(2)
 
 with m_row1_col1:
@@ -463,225 +465,167 @@ with m_row1_col2:
 def draw_dimension_arrows(ax):
     if not show_dimension:
         return
-
-    arrow_props = dict(arrowstyle='<->', color='#1a4b8c', lw=1.3)
-
+    arrow_props = dict(arrowstyle='<->', color='#1a4b8c', lw=1.2)
     if layout_name == "INV_X1":
         ax.annotate('', xy=(x0_core, y0_core - 4), xytext=(x0_core + 63, y0_core - 4), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(x0_core + 31.5, y0_core - 6, '63 nm (18λ)', color='#1a4b8c', fontsize=9, fontweight='bold', ha='center', va='bottom', clip_on=False)
-
+        ax.text(x0_core + 31.5, y0_core - 6, '63 nm (18λ)', color='#1a4b8c', fontsize=8.5, fontweight='bold', ha='center', va='bottom', clip_on=False)
         ax.annotate('', xy=(x0_core + 67, y0_core), xytext=(x0_core + 67, y0_core + 189), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(x0_core + 70, y0_core + 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=9, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
-
-        ax.annotate('', xy=(x0_core + 55, y0_core + 63), xytext=(x0_core + 55, y0_core + 126), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(x0_core + 58, y0_core + 94.5, '63 nm*', color='#1a4b8c', fontsize=8, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
-
+        ax.text(x0_core + 70, y0_core + 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=8.5, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
     elif layout_name == "NAND2_X4":
         ax.annotate('', xy=(x0_core, y0_core - 4), xytext=(x0_core + 157.5, y0_core - 4), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(x0_core + 78.75, y0_core - 6, '157.5 nm (45λ)', color='#1a4b8c', fontsize=9, fontweight='bold', ha='center', va='bottom', clip_on=False)
-
+        ax.text(x0_core + 78.75, y0_core - 6, '157.5 nm (45λ)', color='#1a4b8c', fontsize=8.5, fontweight='bold', ha='center', va='bottom', clip_on=False)
         ax.annotate('', xy=(x0_core + 162, y0_core), xytext=(x0_core + 162, y0_core + 189), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(x0_core + 165, y0_core + 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=9, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
-
+        ax.text(x0_core + 165, y0_core + 94.5, '189 nm (54λ)', color='#1a4b8c', fontsize=8.5, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
     else:
         ax.annotate('', xy=(x0_core, y0_core - 4), xytext=(x0_core + w_core_nm, y0_core - 4), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(x0_core + w_core_nm / 2.0, y0_core - 6, f'{w_core_nm:.1f} nm', color='#1a4b8c', fontsize=9, fontweight='bold', ha='center', va='bottom', clip_on=False)
-
+        ax.text(x0_core + w_core_nm / 2.0, y0_core - 6, f'{w_core_nm:.1f} nm', color='#1a4b8c', fontsize=8.5, fontweight='bold', ha='center', va='bottom', clip_on=False)
         ax.annotate('', xy=(x0_core + w_core_nm + 4, y0_core), xytext=(x0_core + w_core_nm + 4, y0_core + h_core_nm), arrowprops=arrow_props, annotation_clip=False)
-        ax.text(x0_core + w_core_nm + 7, y0_core + h_core_nm / 2.0, f'{h_core_nm:.1f} nm', color='#1a4b8c', fontsize=9, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
+        ax.text(x0_core + w_core_nm + 7, y0_core + h_core_nm / 2.0, f'{h_core_nm:.1f} nm', color='#1a4b8c', fontsize=8.5, fontweight='bold', ha='left', va='center', rotation=-90, clip_on=False)
 
-# 11. 타겟 외곽선 오버레이
+# 11. 외곽선 오버레이
 def overlay_target_outline(ax):
     if not show_outline:
         return
-    ax.contour(target_sub, levels=[0.5], colors=['#ffffff'], linestyles=['--'], linewidths=[1.4],
+    ax.contour(target_sub, levels=[0.5], colors=['#ffffff'], linestyles=['--'], linewidths=[1.2],
                extent=[0, total_w_nm, total_h_nm, 0], origin='upper')
 
-# 12. 전/후 종합 비교 분석 플롯
+# 12. 최적화된 종합 비교 플롯
 def generate_comprehensive_plot():
-    fig = plt.figure(figsize=(22.5, 14.5), facecolor='#ffffff')
-
-    gs = fig.add_gridspec(
-        2, 4,
-        height_ratios=[1.0, 1.0],
-        hspace=0.28,
-        wspace=0.22,
-        left=0.06, right=0.95, top=0.93, bottom=0.05
-    )
+    fig = plt.figure(figsize=(19.0, 12.0), facecolor='#ffffff')
+    gs = fig.add_gridspec(2, 4, height_ratios=[1.0, 1.0], hspace=0.28, wspace=0.22, left=0.06, right=0.95, top=0.93, bottom=0.05)
 
     major_x = 21.0 if total_w_nm > 50 else 10.5
     major_y = 31.5 if total_h_nm > 70 else 10.5
 
-    # ------------------ ROW 0: BEFORE OPC ------------------
+    # ROW 0: BEFORE OPC
     ax_top = [fig.add_subplot(gs[0, c]) for c in range(4)]
-    fig.text(0.06, 0.955, "SECTION 1: BEFORE OPC (Conventional Mask on 0.875nm Sub-grid)",
-             fontsize=13, fontweight='heavy', color='#b71c1c', ha='left')
+    fig.text(0.06, 0.955, "SECTION 1: BEFORE OPC (Conventional Mask on 0.875nm Sub-grid)", fontsize=12, fontweight='heavy', color='#b71c1c', ha='left')
 
     ax_top[0].imshow(target_sub, cmap='Blues', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
-    ax_top[0].set_title("(A) Target Pattern\n(Design Specification: 3.5nm Grid)", fontsize=10.5, fontweight='bold', pad=10)
+    ax_top[0].set_title("(A) Target Pattern\n(Design: 3.5nm Grid)", fontsize=10, fontweight='bold', pad=8)
     draw_dimension_arrows(ax_top[0])
 
     ax_top[1].imshow(target_sub, cmap='Purples', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
-    ax_top[1].set_title("(B-1) Before Mask (No OPC)\n(0.875nm Sub-pixel Raw Mask)", fontsize=10.5, fontweight='bold', pad=10)
+    ax_top[1].set_title("(B-1) Before Mask (No OPC)\n(0.875nm Raw Mask)", fontsize=10, fontweight='bold', pad=8)
 
     im_c0 = ax_top[2].imshow(norm_exp_before, cmap='inferno', origin='upper', extent=extent_nm, interpolation='bilinear', vmin=0.0, vmax=1.0)
-    ax_top[2].set_title("(C-1) Aerial Image (Before)\n(Intensity Profile: σ=6.5nm)", fontsize=10.5, fontweight='bold', pad=10)
+    ax_top[2].set_title("(C-1) Aerial Image (Before)\n(Intensity Profile: σ=6.5nm)", fontsize=10, fontweight='bold', pad=8)
     overlay_target_outline(ax_top[2])
     cbar0 = fig.colorbar(im_c0, ax=ax_top[2], fraction=0.046, pad=0.04)
-    cbar0.ax.tick_params(labelsize=8.5)
+    cbar0.ax.tick_params(labelsize=8)
 
     diff_before = np.zeros((*target_sub.shape, 3))
     diff_before[(target_sub == 1) & (printed_before == 1)] = [0.1, 0.85, 0.1]
     diff_before[(target_sub == 1) & (printed_before == 0)] = [0.95, 0.1, 0.1]
     diff_before[(target_sub == 0) & (printed_before == 1)] = [0.1, 0.4, 0.95]
     ax_top[3].imshow(diff_before, origin='upper', extent=extent_nm, interpolation='nearest')
-    ax_top[3].set_title(f"(D-1) Superposition (Before)\nStrict IoU: {stats_b['strict_iou']:.1f}% | DFM: {stats_b['dfm_yield']:.1f}%", fontsize=10.5, fontweight='bold', pad=10)
+    ax_top[3].set_title(f"(D-1) Superposition (Before)\nStrict IoU: {stats_b['strict_iou']:.1f}% | DFM: {stats_b['dfm_yield']:.1f}%", fontsize=10, fontweight='bold', pad=8)
     overlay_target_outline(ax_top[3])
 
-    # ------------------ 가운데 영역: 좌측 제목 & 우측 파라미터 박스 ------------------
-    fig.text(0.06, 0.485, "SECTION 2: AFTER OPC (0.875nm Fine-Tuned Sub-grid OPC Optimization)",
-             fontsize=13, fontweight='heavy', color='#1b5e20', ha='left', va='center')
-
+    # MIDDLE SUMMARY
+    fig.text(0.06, 0.485, "SECTION 2: AFTER OPC (0.875nm Fine-Tuned Sub-grid OPC Optimization)", fontsize=12, fontweight='heavy', color='#1b5e20', ha='left', va='center')
     summary_text = (
-        f"[SUB-GRID] Target: {target_unit_nm}nm | Mask: {mask_unit_nm:.3f}nm | 4x Reticle: {reticle_feature_nm:.1f}nm  |  "
-        f"PSF: σ={sigma_nm:.1f}nm, I_th={threshold:.2f}\n"
+        f"[SUB-GRID] Target: {target_unit_nm}nm | Mask: {mask_unit_nm:.3f}nm | 4x Reticle: {reticle_feature_nm:.1f}nm | PSF: σ={sigma_nm:.1f}nm, I_th={threshold:.2f}\n"
         f"[PRIMARY 1: GEOMETRIC IoU] Strict IoU: {stats_b['strict_iou']:.1f}% ──▶ {stats_a['strict_iou']:.1f}% ({iou_delta:+.1f}%p Improved)\n"
-        f"[PRIMARY 2: DFM RELIABILITY] DFM Yield: {stats_b['dfm_yield']:.1f}% ──▶ {stats_a['dfm_yield']:.1f}% ({dfm_delta:+.1f}%p) | "
-        f"Opens: {stats_a['crit_open']}px | Short Hazards: +{short_added}px"
+        f"[PRIMARY 2: DFM RELIABILITY] DFM Yield: {stats_b['dfm_yield']:.1f}% ──▶ {stats_a['dfm_yield']:.1f}% ({dfm_delta:+.1f}%p) | Opens: {stats_a['crit_open']}px | Short Hazards: +{short_added}px"
     )
+    fig.text(0.95, 0.485, summary_text, fontsize=8, family='monospace', fontweight='bold', color='#0f172a', ha='right', va='center',
+             bbox=dict(boxstyle='round,pad=0.5', facecolor='#f8fafc', edgecolor='#2563eb', linewidth=1.2, alpha=0.98))
 
-    fig.text(
-        0.95, 0.485, summary_text,
-        fontsize=8.5, family='monospace', fontweight='bold', color='#0f172a',
-        ha='right', va='center',
-        bbox=dict(
-            boxstyle='round,pad=0.5',
-            facecolor='#f8fafc',
-            edgecolor='#2563eb',
-            linewidth=1.4,
-            alpha=0.98
-        )
-    )
-
-    # ------------------ ROW 1: AFTER OPC ------------------
+    # ROW 1: AFTER OPC
     ax_bot = [fig.add_subplot(gs[1, c]) for c in range(4)]
-
     ax_bot[0].imshow(target_sub, cmap='Blues', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
-    ax_bot[0].set_title("(A) Target Reference\n(Golden Target Layout)", fontsize=10.5, fontweight='bold', pad=10)
+    ax_bot[0].set_title("(A) Target Reference\n(Golden Target Layout)", fontsize=10, fontweight='bold', pad=8)
 
     ax_bot[1].imshow(st.session_state.current_mask_sub, cmap='Purples', origin='upper', extent=extent_nm, interpolation='nearest', vmin=0, vmax=1)
-    ax_bot[1].set_title("(B-2) After Mask (0.875nm Sub-grid)\n(4x Reticle: 3.5nm E-beam Serifs)", fontsize=10.5, fontweight='bold', pad=10)
+    ax_bot[1].set_title("(B-2) After Mask (0.875nm Sub-grid)\n(4x Reticle: 3.5nm E-beam Serifs)", fontsize=10, fontweight='bold', pad=8)
 
     im_c1 = ax_bot[2].imshow(norm_exp_after, cmap='inferno', origin='upper', extent=extent_nm, interpolation='bilinear', vmin=0.0, vmax=1.0)
-    ax_bot[2].set_title("(C-2) Aerial Image (After)\n(Sub-grid Corrected Intensity)", fontsize=10.5, fontweight='bold', pad=10)
+    ax_bot[2].set_title("(C-2) Aerial Image (After)\n(Corrected Intensity Profile)", fontsize=10, fontweight='bold', pad=8)
     overlay_target_outline(ax_bot[2])
     cbar1 = fig.colorbar(im_c1, ax=ax_bot[2], fraction=0.046, pad=0.04)
-    cbar1.ax.tick_params(labelsize=8.5)
+    cbar1.ax.tick_params(labelsize=8)
 
     diff_after = np.zeros((*target_sub.shape, 3))
     diff_after[(target_sub == 1) & (printed_after == 1)] = [0.1, 0.85, 0.1]
     diff_after[(target_sub == 1) & (printed_after == 0)] = [0.95, 0.1, 0.1]
     diff_after[(target_sub == 0) & (printed_after == 1)] = [0.1, 0.4, 0.95]
     ax_bot[3].imshow(diff_after, origin='upper', extent=extent_nm, interpolation='nearest')
-    ax_bot[3].set_title(f"(D-2) Superposition (After)\nStrict IoU: {stats_a['strict_iou']:.1f}% | DFM: {stats_a['dfm_yield']:.1f}%", fontsize=10.5, fontweight='bold', pad=10)
+    ax_bot[3].set_title(f"(D-2) Superposition (After)\nStrict IoU: {stats_a['strict_iou']:.1f}% | DFM: {stats_a['dfm_yield']:.1f}%", fontsize=10, fontweight='bold', pad=8)
     overlay_target_outline(ax_bot[3])
 
     for ax in ax_top + ax_bot:
-        ax.set_xlabel("X Position (nm)", fontsize=9, fontweight='bold')
-        ax.set_ylabel("Y Position (nm)", fontsize=9, fontweight='bold')
+        ax.set_xlabel("X Position (nm)", fontsize=8.5, fontweight='bold')
+        ax.set_ylabel("Y Position (nm)", fontsize=8.5, fontweight='bold')
         ax.xaxis.set_major_locator(MultipleLocator(major_x))
         ax.yaxis.set_major_locator(MultipleLocator(major_y))
         ax.tick_params(axis='both', which='major', labelsize=8)
         if show_grid:
             ax.xaxis.set_minor_locator(MultipleLocator(target_unit_nm))
             ax.yaxis.set_minor_locator(MultipleLocator(target_unit_nm))
-            ax.grid(which='minor', color='gray', linestyle=':', linewidth=0.5, alpha=0.5)
-            ax.grid(which='major', color='black', linestyle='--', linewidth=0.7, alpha=0.6)
+            ax.grid(which='minor', color='gray', linestyle=':', linewidth=0.4, alpha=0.4)
+            ax.grid(which='major', color='black', linestyle='--', linewidth=0.6, alpha=0.5)
 
     return fig
 
 st.subheader("Lithography & OPC Comprehensive Verification")
 fig_result = generate_comprehensive_plot()
 st.pyplot(fig_result)
+plt.close(fig_result)  # 메모리 누수 방지
 
-# 13. 안쪽 코너 홈(Cut) & 바깥쪽 세리프 결합형 서브그리드 최적화 엔진
-def run_subgrid_opc(target_mat_sub, opt_kernel, opt_th, iterations=8):
-    h, w = target_mat_sub.shape
+# 13. [초고속 완전 벡터화] 서브그리드 자동 OPC 엔진
+def run_subgrid_opc_fast(target_mat_sub, sigma_px_val, opt_th, iterations=8):
     base = target_mat_sub.copy()
-
     is_symmetric = np.allclose(base, np.fliplr(base))
     mask = base.copy()
 
+    # 거리 맵
     space_to_wire_nm = distance_transform_edt(base == 0) * mask_unit_nm
     wire_depth_nm = distance_transform_edt(base == 1) * mask_unit_nm
 
-    # -------------------------------------------------------------
-    # 1. 외곽 돌출 코너 세리프 (+) & 안쪽 꺾임 코너 홈 파기 (-)
-    # -------------------------------------------------------------
-    pad = np.pad(base, 3, mode='constant', constant_values=0)
-    for r in range(h):
-        for c in range(w):
-            center = pad[r+3, c+3]
-            corner_window = pad[r:r+7, c:c+7]
-            win_sum = np.sum(corner_window)
+    # 1. 고속 코너 판정 (7x7 박스 필터 컨볼루션)
+    box_kernel_7 = np.ones((7, 7), dtype=float)
+    win_sum = convolve(base, box_kernel_7, mode='constant', cval=0.0)
 
-            # (1) 외부 볼록 코너 (Convex Corner): 살 덧붙이기 (+)
-            if center == 0:
-                if space_to_wire_nm[r, c] > 5.0 and 14 <= win_sum <= 32:
-                    mask[r, c] = 1.0
+    # 이웃 4방향 0 검출용 십자 커널
+    cross_kernel = np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]], dtype=float)
+    zero_neighbors = convolve((base == 0).astype(float), cross_kernel, mode='constant', cval=0.0)
 
-            # (2) 내부 오목 코너 (Concave / Inner Corner): 마스크 파내기 (-)
-            # 배선 내부(center == 1)이지만, 주변 7x7 중 빈 공간이 꽤 있고
-            # 배선 코어 중심이 아닌 경계면(wire_depth <= 2.8nm)에 위치한 안쪽 모서리
-            elif center == 1:
-                if 28 <= win_sum <= 40 and wire_depth_nm[r, c] <= 2.625:
-                    # 인접 십자 방향에 빈 공간(0)이 2방향 이상 접하는 직각 안쪽 코너 판정
-                    up = pad[r+2, c+3]
-                    down = pad[r+4, c+3]
-                    left = pad[r+3, c+2]
-                    right = pad[r+3, c+4]
-                    zero_neighbors = (up == 0) + (down == 0) + (left == 0) + (right == 0)
-                    if zero_neighbors >= 1 and (win_sum < 36):
-                        mask[r, c] = 0.0  # 마스크 안쪽으로 파내기 (Anti-Serif Cut)
+    # (1) 외부 볼록 코너 세리프 (+) 부착
+    convex_mask = (base == 0) & (space_to_wire_nm > 5.0) & (win_sum >= 14) & (win_sum <= 32)
+    mask[convex_mask] = 1.0
 
-    # -------------------------------------------------------------
+    # (2) 내부 오목 코너 홈(-) 파내기 (Anti-Serif Cut)
+    concave_mask = (base == 1) & (win_sum >= 28) & (win_sum < 36) & (wire_depth_nm <= 2.625) & (zero_neighbors >= 1)
+    mask[concave_mask] = 0.0
+
     # 2. 선 끝단(Line-End) 안전 외곽 연장 (해머헤드 효과)
-    # -------------------------------------------------------------
     struct_cross = generate_binary_structure(2, 1)
-    dilated = mask.copy()
-    for _ in range(3):
-        dilated = np.maximum(dilated, convolve(dilated, struct_cross, mode='constant') > 0)
-
-    safe_growth = (dilated == 1) & (space_to_wire_nm > 5.0)
+    dilated = binary_dilation(mask > 0, structure=struct_cross, iterations=3)
+    safe_growth = dilated & (space_to_wire_nm > 5.0)
     mask = np.maximum(mask, safe_growth.astype(float))
 
     if is_symmetric:
         mask = np.maximum(mask, np.fliplr(mask))
 
-    # -------------------------------------------------------------
-    # 3. 뼈대 보호형 ILT 오차 역확산 루프 (안쪽 홈 유지)
-    # -------------------------------------------------------------
-    k_diff = int(round(sigma_px * 1.5)) | 1
-    ax_d = np.linspace(-(k_diff // 2), k_diff // 2, k_diff)
-    xd, yd = np.meshgrid(ax_d, ax_d)
-    diff_kernel = np.exp(-(xd**2 + yd**2) / (2.0 * (sigma_px * 0.55)**2))
-    diff_kernel = diff_kernel / np.sum(diff_kernel)
-
-    # 배선 중심 척추 코어 (파내기 허용 경계선 밖의 절대 보호 구역)
+    # 3. 척추 중심 코어 보호 (절대 뚫리지 않아야 하는 메인 도선)
     struct_sq = generate_binary_structure(2, 1)
-    spine_core = binary_erosion(base, structure=struct_sq, iterations=int(round(3.0 / mask_unit_nm))).astype(float)
+    spine_core = binary_erosion(base > 0, structure=struct_sq, iterations=int(round(2.625 / mask_unit_nm))).astype(float)
 
+    # 4. 고속 ILT 루프 (gaussian_filter 기반 가속)
     cont_mask = mask.copy()
+    diff_sigma = sigma_px_val * 0.55
+
     for _ in range(iterations):
         bin_m = (cont_mask >= 0.40).astype(float)
-        bin_m = np.maximum(bin_m, spine_core)  # 중심 척추 단선만 원천 차단
+        bin_m = np.maximum(bin_m, spine_core)
 
-        exp = convolve(bin_m, opt_kernel, mode='constant', cval=0.0)
+        exp = gaussian_filter(bin_m, sigma=sigma_px_val, mode='constant', cval=0.0)
         max_e = np.max(exp) if np.max(exp) > 0 else 1.0
         printed = ((exp / max_e) >= opt_th).astype(float)
 
         error = base - printed
-        grad = convolve(error, diff_kernel, mode='constant', cval=0.0)
+        grad = gaussian_filter(error, sigma=diff_sigma, mode='constant', cval=0.0)
 
         cont_mask += 0.50 * grad
         cont_mask = np.clip(cont_mask, 0.0, 1.0)
@@ -709,8 +653,8 @@ with ctrl_cols[0]:
 
 with ctrl_cols[1]:
     if st.button("⚡ 0.875nm 서브그리드 자동 OPC 실행 (ILT Loop)", type="primary"):
-        with st.spinner("0.875nm 정밀 서브그리드 역노광 최적화 연산 중..."):
-            optimized_mask = run_subgrid_opc(target_sub, opt_kernel_sub, threshold, iterations=8)
+        with st.spinner("0.875nm 서브그리드 고속 역노광 연산 중..."):
+            optimized_mask = run_subgrid_opc_fast(target_sub, sigma_px, threshold, iterations=8)
             st.session_state.current_mask_sub = optimized_mask
             st.rerun()
 
@@ -740,7 +684,7 @@ else:
 
 with ctrl_cols[btn_col_idx]:
     img_buf = io.BytesIO()
-    fig_result.savefig(img_buf, format='png', dpi=300, bbox_inches='tight')
+    fig_result.savefig(img_buf, format='png', dpi=200, bbox_inches='tight')
     st.download_button(
         label="📊 전·후 종합 비교 분석 플롯 (PNG)",
         data=img_buf.getvalue(),

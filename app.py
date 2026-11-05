@@ -604,7 +604,7 @@ st.subheader("Lithography & OPC Comprehensive Verification")
 fig_result = generate_comprehensive_plot()
 st.pyplot(fig_result)
 
-# 13. 전방위 4방향 선 끝 & 적응형 ILT 서브그리드 최적화 엔진
+# 13. 안쪽 코너 홈(Cut) & 바깥쪽 세리프 결합형 서브그리드 최적화 엔진
 def run_subgrid_opc(target_mat_sub, opt_kernel, opt_th, iterations=8):
     h, w = target_mat_sub.shape
     base = target_mat_sub.copy()
@@ -613,44 +613,69 @@ def run_subgrid_opc(target_mat_sub, opt_kernel, opt_th, iterations=8):
     mask = base.copy()
 
     space_to_wire_nm = distance_transform_edt(base == 0) * mask_unit_nm
+    wire_depth_nm = distance_transform_edt(base == 1) * mask_unit_nm
 
-    # 1. 기하학적 미세 세리프 및 전방위(상/하/좌/우) 선 끝단 정밀 연장
+    # -------------------------------------------------------------
+    # 1. 외곽 돌출 코너 세리프 (+) & 안쪽 꺾임 코너 홈 파기 (-)
+    # -------------------------------------------------------------
     pad = np.pad(base, 3, mode='constant', constant_values=0)
     for r in range(h):
         for c in range(w):
             center = pad[r+3, c+3]
+            corner_window = pad[r:r+7, c:c+7]
+            win_sum = np.sum(corner_window)
+
+            # (1) 외부 볼록 코너 (Convex Corner): 살 덧붙이기 (+)
             if center == 0:
-                if space_to_wire_nm[r, c] > 5.0:
-                    corner_window = pad[r:r+7, c:c+7]
-                    if np.sum(corner_window) >= 14:
-                        mask[r, c] = 1.0
+                if space_to_wire_nm[r, c] > 5.0 and 14 <= win_sum <= 32:
+                    mask[r, c] = 1.0
+
+            # (2) 내부 오목 코너 (Concave / Inner Corner): 마스크 파내기 (-)
+            # 배선 내부(center == 1)이지만, 주변 7x7 중 빈 공간이 꽤 있고
+            # 배선 코어 중심이 아닌 경계면(wire_depth <= 2.8nm)에 위치한 안쪽 모서리
             elif center == 1:
-                up, down = pad[r+2, c+3], pad[r+4, c+3]
-                left, right = pad[r+3, c+2], pad[r+3, c+4]
+                if 28 <= win_sum <= 40 and wire_depth_nm[r, c] <= 2.625:
+                    # 인접 십자 방향에 빈 공간(0)이 2방향 이상 접하는 직각 안쪽 코너 판정
+                    up = pad[r+2, c+3]
+                    down = pad[r+4, c+3]
+                    left = pad[r+3, c+2]
+                    right = pad[r+3, c+4]
+                    zero_neighbors = (up == 0) + (down == 0) + (left == 0) + (right == 0)
+                    if zero_neighbors >= 1 and (win_sum < 36):
+                        mask[r, c] = 0.0  # 마스크 안쪽으로 파내기 (Anti-Serif Cut)
 
-                if up == 0 and down == 1 and r > 2:
-                    mask[max(0, r-3):r+1, c] = 1.0
-                if up == 1 and down == 0 and r < h - 3:
-                    mask[r:min(h, r+4), c] = 1.0
+    # -------------------------------------------------------------
+    # 2. 선 끝단(Line-End) 안전 외곽 연장 (해머헤드 효과)
+    # -------------------------------------------------------------
+    struct_cross = generate_binary_structure(2, 1)
+    dilated = mask.copy()
+    for _ in range(3):
+        dilated = np.maximum(dilated, convolve(dilated, struct_cross, mode='constant') > 0)
 
-                if left == 0 and right == 1 and c > 2:
-                    mask[r, max(0, c-3):c+1] = 1.0
-                if left == 1 and right == 0 and c < w - 3:
-                    mask[r, c:min(w, c+4)] = 1.0
+    safe_growth = (dilated == 1) & (space_to_wire_nm > 5.0)
+    mask = np.maximum(mask, safe_growth.astype(float))
 
     if is_symmetric:
         mask = np.maximum(mask, np.fliplr(mask))
 
-    # 2. 적응형 역노광 최적화(ILT) 루프
+    # -------------------------------------------------------------
+    # 3. 뼈대 보호형 ILT 오차 역확산 루프 (안쪽 홈 유지)
+    # -------------------------------------------------------------
     k_diff = int(round(sigma_px * 1.5)) | 1
     ax_d = np.linspace(-(k_diff // 2), k_diff // 2, k_diff)
     xd, yd = np.meshgrid(ax_d, ax_d)
     diff_kernel = np.exp(-(xd**2 + yd**2) / (2.0 * (sigma_px * 0.55)**2))
     diff_kernel = diff_kernel / np.sum(diff_kernel)
 
+    # 배선 중심 척추 코어 (파내기 허용 경계선 밖의 절대 보호 구역)
+    struct_sq = generate_binary_structure(2, 1)
+    spine_core = binary_erosion(base, structure=struct_sq, iterations=int(round(3.0 / mask_unit_nm))).astype(float)
+
     cont_mask = mask.copy()
     for _ in range(iterations):
         bin_m = (cont_mask >= 0.40).astype(float)
+        bin_m = np.maximum(bin_m, spine_core)  # 중심 척추 단선만 원천 차단
+
         exp = convolve(bin_m, opt_kernel, mode='constant', cval=0.0)
         max_e = np.max(exp) if np.max(exp) > 0 else 1.0
         printed = ((exp / max_e) >= opt_th).astype(float)
@@ -658,14 +683,16 @@ def run_subgrid_opc(target_mat_sub, opt_kernel, opt_th, iterations=8):
         error = base - printed
         grad = convolve(error, diff_kernel, mode='constant', cval=0.0)
 
-        cont_mask += 0.65 * grad
+        cont_mask += 0.50 * grad
         cont_mask = np.clip(cont_mask, 0.0, 1.0)
-        cont_mask = np.maximum(cont_mask, base)
+        cont_mask = np.maximum(cont_mask, spine_core)
 
         if is_symmetric:
             cont_mask = 0.5 * (cont_mask + np.fliplr(cont_mask))
 
     final_mask = (cont_mask >= 0.38).astype(float)
+    final_mask = np.maximum(final_mask, spine_core)
+
     if is_symmetric:
         final_mask = np.maximum(final_mask, np.fliplr(final_mask))
 
